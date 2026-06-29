@@ -110,6 +110,32 @@ type WaferPayload = {
   plan_tier?: string;
 };
 
+type NeuralwattPayload = {
+  balance?: {
+    credits_remaining_usd?: number | string;
+  };
+  subscription?: {
+    plan?: string;
+    billing_interval?: string;
+    current_period_start?: string;
+    current_period_end?: string;
+    kwh_included?: number | string;
+    kwh_used?: number | string;
+    in_overage?: boolean;
+    kwh_reset_date?: string;
+  } | null;
+  key?: {
+    name?: string;
+    allowance?: {
+      limit_usd?: number | string;
+      period?: string;
+      spent_usd?: number | string;
+      blocked?: boolean;
+      reset_at?: string;
+    } | null;
+  };
+};
+
 export type ProviderResult = {
   providerId: string;
   providerName: string;
@@ -451,6 +477,11 @@ export const listConfiguredQuotaProviders = () => {
   const waferAuth = normalizeAuthEntry(getAuthEntry(auth, ['wafer', 'wafer-ai', 'wafer_ai', 'wafer.ai']));
   if (waferAuth && ((waferAuth as Record<string, unknown>).key || (waferAuth as Record<string, unknown>).token)) {
     configured.add('wafer');
+  }
+
+  const neuralwattAuth = normalizeAuthEntry(getAuthEntry(auth, ['neuralwatt']));
+  if (neuralwattAuth && ((neuralwattAuth as Record<string, unknown>).key || (neuralwattAuth as Record<string, unknown>).token)) {
+    configured.add('neuralwatt');
   }
 
   return Array.from(configured);
@@ -1862,6 +1893,171 @@ const fetchWaferQuota = async (): Promise<ProviderResult> => {
   }
 };
 
+const NEURALWATT_QUOTA_URL = 'https://api.neuralwatt.com/v1/quota';
+
+const capitalizeFirstNeuralwatt = (value: string | null | undefined): string | null => {
+  if (typeof value !== 'string' || !value) return value ?? null;
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
+
+const computeNeuralwattAllowanceResetAt = (period: string): number | null => {
+  const now = new Date();
+  if (period === 'daily') {
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0);
+  }
+  if (period === 'weekly') {
+    const day = now.getUTCDay();
+    const daysUntilMonday = day === 1 ? 7 : (8 - day) % 7;
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday, 0, 0, 0);
+  }
+  if (period === 'monthly') {
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0);
+  }
+  return null;
+};
+
+const neuralwattAllowanceWindowSeconds = (period: string): number | null => {
+  if (period === 'daily') return 86400;
+  if (period === 'weekly') return 604800;
+  if (period === 'monthly') return 30 * 86400;
+  return null;
+};
+
+const fetchNeuralwattQuota = async (): Promise<ProviderResult> => {
+  const auth = readAuthFile();
+  const entry = normalizeAuthEntry(getAuthEntry(auth, ['neuralwatt'])) as Record<string, unknown> | null;
+  const apiKey = (entry?.key as string | undefined) ?? (entry?.token as string | undefined);
+
+  if (!apiKey) {
+    return buildResult({
+      providerId: 'neuralwatt',
+      providerName: 'NeuralWatt',
+      ok: false,
+      configured: false,
+      error: 'Not configured',
+    });
+  }
+
+  const timeoutSignal = AbortSignal.timeout(15_000);
+
+  try {
+    const response = await fetch(NEURALWATT_QUOTA_URL, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Accept-Encoding': 'identity',
+      },
+      signal: timeoutSignal,
+    });
+
+    if (!response.ok) {
+      return buildResult({
+        providerId: 'neuralwatt',
+        providerName: 'NeuralWatt',
+        ok: false,
+        configured: true,
+        error: response.status === 401
+          ? 'Session expired — please re-authenticate with NeuralWatt'
+          : `API error: ${response.status}`,
+      });
+    }
+
+    const payload = await response.json() as NeuralwattPayload;
+    const subscription = payload?.subscription ?? null;
+    const inOverage = Boolean(subscription?.in_overage);
+    const allowance = payload?.key?.allowance ?? null;
+    const keyName = payload?.key?.name ?? null;
+    const creditsRemaining = toNumber(payload?.balance?.credits_remaining_usd);
+
+    const windows: Record<string, UsageWindow> = {};
+
+    if (subscription && !inOverage) {
+      const kwhIncluded = toNumber(subscription.kwh_included);
+      const kwhUsed = toNumber(subscription.kwh_used);
+      const plan = typeof subscription.plan === 'string' && subscription.plan.trim()
+        ? subscription.plan.trim()
+        : null;
+      const billingInterval = typeof subscription.billing_interval === 'string' && subscription.billing_interval.trim()
+        ? subscription.billing_interval.trim()
+        : null;
+      const subLabel = [capitalizeFirstNeuralwatt(plan), billingInterval].filter(Boolean).join(' - ');
+      const usedPercent = kwhIncluded !== null && kwhIncluded > 0 && kwhUsed !== null
+        ? Math.max(0, Math.min(100, (kwhUsed / kwhIncluded) * 100))
+        : null;
+      const subResetAt = toTimestamp(subscription.kwh_reset_date) ?? toTimestamp(subscription.current_period_end);
+      const windowSeconds = neuralwattAllowanceWindowSeconds('monthly');
+      if (subLabel) {
+        windows[subLabel] = toUsageWindow({
+          usedPercent,
+          windowSeconds,
+          resetAt: subResetAt,
+        });
+      }
+    } else if (allowance) {
+      const spent = toNumber(allowance.spent_usd);
+      const limit = toNumber(allowance.limit_usd);
+      const effectiveLimit = limit !== null && creditsRemaining !== null
+        ? Math.min(limit, creditsRemaining)
+        : (limit ?? creditsRemaining);
+      const period = typeof allowance.period === 'string' && allowance.period.trim()
+        ? allowance.period.trim()
+        : null;
+      const labelName = typeof keyName === 'string' && keyName.trim() ? keyName.trim() : null;
+      const labelParts: string[] = labelName ? [`${capitalizeFirstNeuralwatt(labelName)} key`] : [];
+      if (period) labelParts.push(period);
+      const allowLabel = labelParts.join(' - ');
+      const blocked = Boolean(allowance.blocked);
+      const usedPercent = blocked
+        ? 100
+        : (spent !== null && effectiveLimit !== null && effectiveLimit > 0
+            ? Math.max(0, Math.min(100, (spent / effectiveLimit) * 100))
+            : null);
+      const resetAt = toTimestamp(allowance.reset_at) ?? (period ? computeNeuralwattAllowanceResetAt(period) : null);
+      const windowSeconds = period ? neuralwattAllowanceWindowSeconds(period) : null;
+      if (allowLabel) {
+        windows[allowLabel] = toUsageWindow({
+          usedPercent,
+          windowSeconds,
+          resetAt,
+          ...(blocked ? { valueLabel: '(blocked)' } : {}),
+        });
+      }
+    }
+
+    if (creditsRemaining !== null) {
+      windows.credits_balance = toUsageWindow({
+        usedPercent: null,
+        windowSeconds: null,
+        resetAt: null,
+        valueLabel: `$${formatMoney(creditsRemaining)}`,
+      });
+    }
+
+    return buildResult({
+      providerId: 'neuralwatt',
+      providerName: 'NeuralWatt',
+      ok: true,
+      configured: true,
+      usage: { windows },
+    });
+  } catch (error) {
+    const isTimeout = error instanceof DOMException && error.name === 'AbortError' && timeoutSignal.aborted;
+    const isParseError = error instanceof SyntaxError;
+    return buildResult({
+      providerId: 'neuralwatt',
+      providerName: 'NeuralWatt',
+      ok: false,
+      configured: true,
+      error: isTimeout
+        ? 'Request timed out'
+        : isParseError
+          ? 'Invalid response from provider'
+          : (error instanceof Error ? error.message : 'Request failed'),
+    });
+  }
+};
+
 export const fetchQuotaForProvider = async (providerId: string): Promise<ProviderResult> => {
   switch (providerId) {
     case 'claude':
@@ -1892,6 +2088,8 @@ export const fetchQuotaForProvider = async (providerId: string): Promise<Provide
       return fetchZhipuaiCodingPlanQuota();
     case 'wafer':
       return fetchWaferQuota();
+    case 'neuralwatt':
+      return fetchNeuralwattQuota();
     default:
       return buildResult({
         providerId,
