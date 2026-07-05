@@ -64,6 +64,7 @@
       }
     ],
     "afterPack": "scripts/after-pack.cjs",
+    "afterAllArtifactBuild": "scripts/embed-appimage-update-info.cjs",
     "directories": {
       "buildResources": "resources/icons",
       "output": "dist"
@@ -94,6 +95,16 @@
       ],
       "verifyUpdateCodeSignature": false,
       "artifactName": "${productName}-${version}-win-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "resources/icons/icon.png",
+      "category": "Development",
+      "maintainer": "OpenChamber",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": true,
