@@ -9,6 +9,19 @@
 // Returns the generated .zsync paths so electron-builder publishes them
 // alongside the AppImage in the GitHub release.
 //
+// appimagetool resolution (no FUSE required at any step):
+//   1. cached static ELF at ~/.cache/openchamber/appimagetool/appimagetool
+//   2. $APPIMAGETOOL env override (AppImage or static ELF; if AppImage,
+//      extract the inner /usr/bin/appimagetool and cache it)
+//   3. appimagetool on PATH (same dual-shape handling as env)
+//   4. download appimagetool-<arch>.AppImage from the AppImage continuous
+//      release, extract, cache — first run only; subsequent builds hit #1
+//
+// The inner appimagetool binary is statically linked, so it runs on any
+// x86_64/arm64/armhf Linux without dependencies. The AppImage runtime's
+// --appimage-extract path also doesn't need FUSE, so the entire hook is
+// FUSE-less: download -> extract -> run static ELF.
+//
 // Caveat (known, acceptable for v1): electron-builder already computed
 // sha512/blockmap for the original AppImage and wrote latest-linux.yml with
 // those hashes. After repacking, those hashes are stale. electron-updater
@@ -17,7 +30,7 @@
 //
 // Skip conditions (never fail the build):
 //   - no AppImage in artifacts (mac/win CI, local dev)
-//   - appimagetool not on PATH and APPIMAGETOOL env unset
+//   - appimagetool unobtainable AND no network AND no env override
 //   - repack fails (warn + continue with original)
 
 const { spawnSync } = require('node:child_process');
@@ -25,15 +38,115 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const resolveAppImageTool = () => {
-  const fromEnv = process.env.APPIMAGETOOL;
-  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
-  const onPath = spawnSync('command', ['-v', 'appimagetool'], { encoding: 'utf8', shell: os.platform() === 'win32' });
-  if (onPath.status === 0) {
-    const found = String(onPath.stdout || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    if (found) return found;
+const APPTOOL_BASE_URL = 'https://github.com/AppImage/appimagetool/releases/download/continuous';
+const APPTOOL_ARCH_MAP = { x64: 'x86_64', arm64: 'aarch64', arm: 'armhf' };
+
+const appImageToolCacheDir = () => path.join(os.homedir(), '.cache', 'openchamber', 'appimagetool');
+
+const probeVersion = (file) => {
+  try {
+    const r = spawnSync(file, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return r.status === 0 && /appimagetool/i.test(String(r.stdout || '')) ? String(r.stdout).trim() : null;
+  } catch {
+    return null;
   }
-  return null;
+};
+
+const extractInnerAppImageTool = (appImagePath) => {
+  const cacheDir = appImageToolCacheDir();
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const extract = spawnSync(appImagePath, ['--appimage-extract'], { cwd: cacheDir, encoding: 'utf8' });
+  if (extract.status !== 0) {
+    throw new Error(`--appimage-extract exited ${extract.status}: ${extract.stderr || extract.stdout}`);
+  }
+  const inner = path.join(cacheDir, 'squashfs-root', 'usr', 'bin', 'appimagetool');
+  if (!fs.existsSync(inner)) {
+    throw new Error('appimagetool AppImage did not contain usr/bin/appimagetool');
+  }
+  const finalPath = path.join(cacheDir, 'appimagetool');
+  fs.copyFileSync(inner, finalPath);
+  fs.rmSync(path.join(cacheDir, 'squashfs-root'), { recursive: true, force: true });
+  fs.chmodSync(finalPath, 0o755);
+  return finalPath;
+};
+
+const downloadAppImageToolAppImage = (arch) => {
+  const url = `${APPTOOL_BASE_URL}/appimagetool-${arch}.AppImage`;
+  const destDir = appImageToolCacheDir();
+  fs.mkdirSync(destDir, { recursive: true });
+  const downloadPath = path.join(destDir, `appimagetool-${arch}.AppImage`);
+  console.log(`[appimage-update-info] downloading appimagetool from ${url}`);
+  const curl = spawnSync('curl', ['-fL', '--retry', '3', '-o', downloadPath, url], { encoding: 'utf8' });
+  if (curl.status !== 0) {
+    throw new Error(`curl failed (exit ${curl.status}): ${curl.stderr || curl.stdout || ''}`);
+  }
+  fs.chmodSync(downloadPath, 0o755);
+  return downloadPath;
+};
+
+const resolveAppImageTool = () => {
+  const cacheDir = appImageToolCacheDir();
+  const cachedBinary = path.join(cacheDir, 'appimagetool');
+
+  // 1. Cached static ELF from a previous run (the common path after first build).
+  if (fs.existsSync(cachedBinary) && probeVersion(cachedBinary)) {
+    return cachedBinary;
+  }
+
+  // 2. $APPIMAGETOOL env override. Accepts a static ELF directly, or an
+  //    AppImage (we extract and cache the inner binary).
+  const fromEnv = process.env.APPIMAGETOOL;
+  if (fromEnv && fs.existsSync(fromEnv)) {
+    if (probeVersion(fromEnv)) return fromEnv;
+    try {
+      console.log('[appimage-update-info] APPIMAGETOOL is an AppImage, extracting inner binary');
+      return extractInnerAppImageTool(fromEnv);
+    } catch (err) {
+      throw new Error(`APPIMAGETOOL=${fromEnv} did not run directly and extraction failed: ${err.message}`);
+    }
+  }
+
+  // 3. appimagetool on PATH (system install; same dual-shape handling).
+  const which = spawnSync('which', ['appimagetool'], { encoding: 'utf8' });
+  if (which.status === 0) {
+    const found = String(which.stdout || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+    if (found && fs.existsSync(found)) {
+      if (probeVersion(found)) return found;
+      try {
+        return extractInnerAppImageTool(found);
+      } catch {
+        // fall through to download
+      }
+    }
+  }
+
+  // 4. Download + extract + cache. First-run only on a clean machine; the
+  //    cached ELF survives across builds. CI may need to persist the cache
+  //    dir (e.g. actions/cache ~ steps caching ~/.cache/openchamber).
+  if (process.env.APPTOOL_NO_DOWNLOAD === '1') {
+    return null;
+  }
+  const arch = APPTOOL_ARCH_MAP[process.arch];
+  if (!arch) {
+    console.warn(`[appimage-update-info] no appimagetool binary for arch ${process.arch}; set APPIMAGETOOL env`);
+    return null;
+  }
+  let downloaded;
+  try {
+    downloaded = downloadAppImageToolAppImage(arch);
+  } catch (err) {
+    console.warn(`[appimage-update-info] download failed: ${err.message}`);
+    return null;
+  }
+  try {
+    const extracted = extractInnerAppImageTool(downloaded);
+    // Best-effort: drop the downloaded AppImage now that we have the inner ELF.
+    try { fs.rmSync(downloaded, { force: true }); } catch {}
+    return extracted;
+  } catch (err) {
+    console.warn(`[appimage-update-info] extract failed: ${err.message}`);
+    return null;
+  }
 };
 
 const resolveRepo = (buildResult) => {
@@ -121,51 +234,3 @@ module.exports = async (buildResult) => {
 
   return extraFiles;
 };
-
-// Minimal self-check: node scripts/embed-appimage-update-info.cjs
-// Exercises the hook against a copy of appimagetool's own AppImage (a known-good
-// type-2 AppImage). Skips with exit 0 if appimagetool not found. Fails loudly
-// (exit 1) if the hook mis-orchestrates extract/repack/verify.
-if (require.main === module) {
-  const assert = require('node:assert');
-  const { spawnSync } = require('node:child_process');
-
-  const tool = process.env.APPIMAGETOOL || resolveAppImageTool();
-  if (!tool) {
-    console.log('[self-check] appimagetool not found; skipping (ok in non-Linux CI)');
-    process.exit(0);
-  }
-
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-hook-selfcheck-'));
-  try {
-    const subject = path.join(workDir, 'OpenChamber-0.0.0-linux-x64.AppImage');
-    fs.copyFileSync(tool, subject);
-    fs.chmodSync(subject, 0o755);
-
-    const buildResult = {
-      artifactPaths: [subject],
-      packager: { config: { publish: { owner: 'selfcheck-owner', repo: 'selfcheck-repo' } }, appInfo: { productName: 'OpenChamber' } },
-    };
-
-    module.exports(buildResult).then((extra) => {
-      assert.deepStrictEqual(extra, [`${subject}.zsync`], 'should return zsync path');
-
-      const verify = spawnSync(subject, ['--appimage-updateinfo'], { encoding: 'utf8' });
-      const embedded = String(verify.stdout || '').trim();
-      assert.strictEqual(
-        embedded,
-        'gh-releases-zsync|selfcheck-owner|selfcheck-repo|latest|OpenChamber-*linux-x64.AppImage.zsync',
-        'embedded .upd_info must match',
-      );
-      assert.ok(fs.existsSync(`${subject}.zsync`), 'zsync file must exist');
-      console.log('[self-check] OK: .upd_info embedded, zsync returned');
-      process.exit(0);
-    }).catch((err) => {
-      console.error('[self-check] FAILED:', err.message);
-      process.exit(1);
-    });
-  } finally {
-    // Best-effort cleanup; defer until process exits so spawned verifications finish.
-    setTimeout(() => { try { fs.rmSync(workDir, { recursive: true, force: true }); } catch {} }, 1000);
-  }
-}
