@@ -55,6 +55,20 @@ if (isDev) {
 app.setAppUserModelId(APP_USER_MODEL_ID);
 app.commandLine.appendSwitch('proxy-bypass-list', '<-loopback>');
 
+// On Linux we force the X11 Ozone backend by passing --ozone-platform=x11
+// as a real CLI arg via the AppImage's executable wrapper (see
+// scripts/after-pack.cjs). Reason: under Wayland, Chromium routes printable
+// keypresses through a broken IME composition path — every key arrives at
+// ghostty-web's keydown handler with keyCode 229 and isComposing=false, no
+// compositionstart/compositionend ever fires, ghostty-web drops the key.
+// Result: terminal shows output but cannot accept typed input.
+// We use a wrapper script rather than app.commandLine.appendSwitch because
+// appendSwitch does not reliably propagate --ozone-platform to the GPU
+// subprocess (main=x11 / GPU=wayland mismatch → SIGSEGV, exit_code=139).
+// Real argv propagation through the wrapper reaches all subprocesses.
+// Cost is losing native Wayland integration (SSD, native notification
+// positioning), none of which we use.
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: UI_PROTOCOL,
@@ -1991,7 +2005,7 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {} }
   const desktopRequestHeaders = rendererRuntimeConfig.requestHeaders || {};
   const desktopHome = os.homedir() || '';
   const desktopMacosMajor = String(macosMajorVersion());
-  const usesCustomTitleBar = process.platform === 'darwin' || process.platform === 'win32';
+  const usesCustomTitleBar = process.platform === 'darwin' || process.platform === 'win32' || process.platform === 'linux';
   // macOS vibrancy, on by default; users can disable it (Appearance settings).
   const useVibrancy = process.platform === 'darwin' && readSettingsRoot().desktopVibrancy !== false;
   const titleBarOverlayEnabled = false;
@@ -2013,7 +2027,7 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {} }
     // here: setting it in the constructor leaves the material uncomposited on a
     // cold launch until a window event. No `transparent: true` either — vibrancy
     // alone is enough and composites reliably once applied to a live window.
-    frame: process.platform === 'win32' ? false : undefined,
+    frame: (process.platform === 'win32' || process.platform === 'linux') ? false : undefined,
     autoHideMenuBar: autoHidesNativeMenuBar,
     // Electron's hiddenInset adds its own extra inset, which leaves the controls
     // visibly lower than the app header. Use a plain hidden title bar instead.
@@ -2373,9 +2387,9 @@ const createMiniChatWindow = async ({ mode, sessionId = '', directory = '', proj
     // here: setting it in the constructor leaves the material uncomposited on a
     // cold launch until a window event. No `transparent: true` either — vibrancy
     // alone is enough and composites reliably once applied to a live window.
-    frame: process.platform === 'win32' ? false : undefined,
+    frame: (process.platform === 'win32' || process.platform === 'linux') ? false : undefined,
     autoHideMenuBar: process.platform !== 'darwin',
-    titleBarStyle: process.platform === 'darwin' || process.platform === 'win32' ? 'hidden' : 'default',
+    titleBarStyle: process.platform === 'darwin' || process.platform === 'win32' || process.platform === 'linux' ? 'hidden' : 'default',
     trafficLightPosition: process.platform === 'darwin' ? { x: 16, y: 17 } : undefined,
     webPreferences: {
       additionalArguments: [
@@ -2930,6 +2944,24 @@ const resolveWindowsTerminalExecutable = () => {
   return findWindowsExecutable('terminal');
 };
 
+const findXdgHandler = (scheme) => {
+  const result = spawnSync('xdg-mime', ['query', 'default', `x-scheme-handler/${scheme}`], {
+    stdio: 'pipe',
+    windowsHide: true,
+  });
+  if (result.status !== 0) return null;
+  const desktopFile = String(result.stdout || '').trim();
+  return desktopFile || null;
+};
+
+const LINUX_URL_SCHEME_BY_APP_ID = {
+  vscode: { scheme: 'vscode', appName: 'Visual Studio Code' },
+  vscodium: { scheme: 'vscodium', appName: 'VSCodium' },
+  cursor: { scheme: 'cursor', appName: 'Cursor' },
+  windsurf: { scheme: 'windsurf', appName: 'Windsurf' },
+  zed: { scheme: 'zed', appName: 'Zed' },
+};
+
 const imageFileToDataUrl = (filePath) => {
   if (!filePath) return null;
   try {
@@ -3104,6 +3136,54 @@ const buildOpenFileSpecs = ({ filePath, appId, appName }) => {
   specs.push({ program: 'open', args: ['-a', appName, filePath] });
   return specs;
 };
+
+const buildLinuxOpenProjectSpecs = ({ projectPath, appId, appName }) => {
+  if (appId === 'finder') {
+    return [{ program: 'xdg-open', args: [projectPath] }];
+  }
+  if (appId === 'terminal') {
+    const executable = spawnSync('which', ['xdg-terminal-exec'], { stdio: 'pipe', windowsHide: true });
+    const termProgram = executable.status === 0 ? String(executable.stdout || '').trim() : '';
+    if (!termProgram) {
+      throw new Error('No terminal emulator found. Install xdg-terminal-exec or a terminal like gnome-terminal, konsole, or xterm.');
+    }
+    return [{ program: termProgram, args: ['--dir', projectPath] }];
+  }
+  const entry = LINUX_URL_SCHEME_BY_APP_ID[appId];
+  if (entry && findXdgHandler(entry.scheme)) {
+    return [{ program: 'xdg-open', args: [`${entry.scheme}://file/${projectPath}`] }];
+  }
+  return [{ program: 'xdg-open', args: [projectPath] }];
+};
+
+const buildLinuxInstalledApps = () => {
+  const apps = [];
+  for (const [appId, entry] of Object.entries(LINUX_URL_SCHEME_BY_APP_ID)) {
+    if (findXdgHandler(entry.scheme)) {
+      apps.push({ name: entry.appName, appId });
+    }
+  }
+  if (spawnSync('which', ['xdg-terminal-exec'], { stdio: 'pipe', windowsHide: true }).status === 0) {
+    apps.push({ name: 'Terminal', appId: 'terminal' });
+  }
+  apps.push({ name: 'File Explorer', appId: 'finder' });
+  return apps;
+};
+
+const buildLinuxOpenFileSpecs = ({ filePath, appId, appName }) => {
+  if (appId === 'finder') {
+    return [{ program: 'xdg-open', args: [path.dirname(filePath)] }];
+  }
+  if (appId === 'terminal') {
+    return buildLinuxOpenProjectSpecs({ projectPath: path.dirname(filePath), appId, appName });
+  }
+  const entry = LINUX_URL_SCHEME_BY_APP_ID[appId];
+  if (entry && findXdgHandler(entry.scheme)) {
+    return [{ program: 'xdg-open', args: [`${entry.scheme}://file/${filePath}`] }];
+  }
+  return [{ program: 'xdg-open', args: [filePath] }];
+};
+
 
 const quoteWindowsCommandArg = (value) => `"${String(value).replace(/"/g, '""')}"`;
 
@@ -3448,6 +3528,10 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         runSpecChain(buildWindowsOpenProjectSpecs({ projectPath, appId, appName }), appName);
         return null;
       }
+      if (process.platform === 'linux') {
+        runSpecChain(buildLinuxOpenProjectSpecs({ projectPath, appId, appName }), appName);
+        return null;
+      }
       if (process.platform !== 'darwin') {
         throw new Error('desktop_open_in_app is only supported on macOS and Windows');
       }
@@ -3466,6 +3550,10 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         runSpecChain(buildWindowsOpenFileSpecs({ filePath, appId, appName }), appName);
         return null;
       }
+      if (process.platform === 'linux') {
+        runSpecChain(buildLinuxOpenFileSpecs({ filePath, appId, appName }), appName);
+        return null;
+      }
       if (process.platform !== 'darwin') {
         throw new Error('desktop_open_file_in_app is only supported on macOS and Windows');
       }
@@ -3476,6 +3564,12 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     case 'desktop_filter_installed_apps': {
       if (process.platform === 'win32') {
         return (await buildWindowsInstalledApps(args.apps)).map((app) => app.name);
+      }
+      if (process.platform === 'linux') {
+        if (!Array.isArray(args.apps)) return [];
+        const installed = buildLinuxInstalledApps();
+        const installedNames = new Set(installed.map((app) => app.name));
+        return args.apps.map(String).filter((name) => installedNames.has(name));
       }
       if (process.platform !== 'darwin') {
         throw new Error('desktop_filter_installed_apps is only supported on macOS');
@@ -3501,6 +3595,9 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
           if (dataUrl) results.push({ app: appName, data_url: dataUrl });
         }
         return results;
+      }
+      if (process.platform === 'linux') {
+        return [];
       }
       if (process.platform !== 'darwin') {
         throw new Error('desktop_fetch_app_icons is only supported on macOS');
@@ -3530,13 +3627,15 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       const refresh = async () => {
         const apps = process.platform === 'win32'
           ? await buildWindowsInstalledApps(args.apps)
-          : await buildInstalledApps(Array.isArray(args.apps) ? args.apps : []);
+          : process.platform === 'linux'
+            ? buildLinuxInstalledApps()
+            : await buildInstalledApps(Array.isArray(args.apps) ? args.apps : []);
         await fsp.mkdir(path.dirname(cachePath), { recursive: true });
         await fsp.writeFile(cachePath, JSON.stringify({ updatedAt: now, apps }, null, 2));
         emitToAllWindows('openchamber:installed-apps-updated', apps);
       };
-      if (process.platform !== 'darwin' && process.platform !== 'win32') {
-        throw new Error('desktop_get_installed_apps is only supported on macOS and Windows');
+      if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
+        throw new Error('desktop_get_installed_apps is only supported on macOS, Windows, and Linux');
       }
       if (!hasCache || isCacheStale || args.force === true) {
         void refresh();
