@@ -73,6 +73,11 @@ const setRootDeviceAttributes = (
 
   if (isDesktopShellRuntime) {
     root.classList.add('desktop-runtime');
+    if (window.__OPENCHAMBER_PLATFORM__ === 'linux') {
+      root.classList.add('desktop-runtime-linux');
+    } else {
+      root.classList.remove('desktop-runtime-linux');
+    }
     root.style.setProperty('--is-mobile', '0');
     root.style.setProperty('--device-type', 'desktop');
     root.style.setProperty('--font-scale', '1');
@@ -81,6 +86,7 @@ const setRootDeviceAttributes = (
     root.classList.remove('mobile-pointer');
   } else {
     root.classList.remove('desktop-runtime');
+    root.classList.remove('desktop-runtime-linux');
     root.style.setProperty('--is-mobile', isMobile ? '1' : '0');
     root.style.setProperty('--device-type', deviceType);
     root.style.setProperty('--font-scale', isMobile ? '0.9' : isTablet ? '0.95' : '1');
