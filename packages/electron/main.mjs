@@ -3147,7 +3147,7 @@ const buildLinuxOpenProjectSpecs = ({ projectPath, appId, appName }) => {
     if (!termProgram) {
       throw new Error('No terminal emulator found. Install xdg-terminal-exec or a terminal like gnome-terminal, konsole, or xterm.');
     }
-    return [{ program: termProgram, args: ['--dir', projectPath] }];
+    return [{ program: termProgram, args: [`--dir=${projectPath}`] }];
   }
   const entry = LINUX_URL_SCHEME_BY_APP_ID[appId];
   if (entry && findXdgHandler(entry.scheme)) {
