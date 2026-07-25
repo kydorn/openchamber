@@ -222,4 +222,21 @@ describe('NeuralWatt quota provider', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBe('Invalid response from provider');
   });
+
+  it('returns no-quota-data on a 200 payload with no usable windows', async () => {
+    // Mirrors the guard wafer.js uses: a bare 200 with no balance/subscription/allowance
+    // must not masquerade as ok:true with empty windows.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse({
+      balance: { credits_remaining_usd: null },
+      subscription: null,
+      key: { name: 'sample', allowance: null },
+    })));
+
+    const result = await fetchQuota();
+
+    expect(result.ok).toBe(false);
+    expect(result.configured).toBe(true);
+    expect(result.error).toBe('No quota data in response');
+    expect(result.usage).toBeNull();
+  });
 });

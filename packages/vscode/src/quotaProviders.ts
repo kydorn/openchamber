@@ -2053,6 +2053,16 @@ const fetchNeuralwattQuota = async (): Promise<ProviderResult> => {
       });
     }
 
+    if (Object.keys(windows).length === 0) {
+      return buildResult({
+        providerId: 'neuralwatt',
+        providerName: 'NeuralWatt',
+        ok: false,
+        configured: true,
+        error: 'No quota data in response',
+      });
+    }
+
     return buildResult({
       providerId: 'neuralwatt',
       providerName: 'NeuralWatt',

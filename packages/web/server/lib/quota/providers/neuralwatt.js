@@ -159,6 +159,16 @@ export const fetchQuota = async () => {
       });
     }
 
+    if (Object.keys(windows).length === 0) {
+      return buildResult({
+        providerId,
+        providerName,
+        ok: false,
+        configured: true,
+        error: 'No quota data in response'
+      });
+    }
+
     return buildResult({
       providerId,
       providerName,
