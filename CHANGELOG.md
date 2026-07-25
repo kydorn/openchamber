@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Mobile/iOS: push notifications now use Apple’s production service by default (thanks to @natheihei).
 - Mobile/iOS: notifications now work for development builds installed from Xcode — the app detects its Apple push environment and the server delivers each device to the matching endpoint, so dev (sandbox) and TestFlight/App Store (production) installs both receive pushes.
 - Desktop: the window-controls position setting now lives under Appearance (thanks to @makeittech).
+- Usage: added Crof and NeuralWatt quota tracking with subscription kWh, independent key-allowance windows, and credits-balance fallback across the web server and VS Code extension.
 
 ## [1.16.3] - 2026-07-22
 
