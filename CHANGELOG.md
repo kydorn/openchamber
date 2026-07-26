@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Mobile/iOS: notifications now work for development builds installed from Xcode — the app detects its Apple push environment and the server delivers each device to the matching endpoint, so dev (sandbox) and TestFlight/App Store (production) installs both receive pushes.
 - Desktop: the window-controls position setting now lives under Appearance (thanks to @makeittech).
 - Usage: added Crof and NeuralWatt quota tracking with subscription kWh, independent key-allowance windows, and credits-balance fallback across the web server and VS Code extension.
+- Usage: Crof and NeuralWatt provider follow-up — fixed NeuralWatt allowance usage math (effectiveLimit now correctly accounts for spent credits), switched NeuralWatt windows to stable map keys with reused i18n labels, dropped dead `fetchCrofQuota`/`fetchNeuralwattQuota` re-exports, removed the speculative wall-clock `computeAllowanceResetAt` fallback (now trusts the API-provided `reset_at` or returns null, matching sibling providers), aligned display name to CrofAI, and ported payload-parsing tests to the VS Code runtime.
 
 ## [1.16.3] - 2026-07-22
 

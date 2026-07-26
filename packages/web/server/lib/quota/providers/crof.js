@@ -9,7 +9,7 @@ import {
 } from '../utils/index.js';
 
 export const providerId = 'crof';
-export const providerName = 'Crof';
+export const providerName = 'CrofAI';
 const aliases = ['crof'];
 const CROF_USAGE_URL = 'https://crof.ai/usage_api/';
 
@@ -53,7 +53,7 @@ export const fetchQuota = async () => {
         ok: false,
         configured: true,
         error: response.status === 401
-          ? 'Session expired — please re-authenticate with Crof'
+          ? 'Session expired — please re-authenticate with CrofAI'
           : `API error: ${response.status}`
       });
     }

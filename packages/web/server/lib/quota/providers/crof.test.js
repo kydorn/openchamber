@@ -67,7 +67,7 @@ describe('Crof quota provider', () => {
 
     expect(result.ok).toBe(false);
     expect(result.configured).toBe(true);
-    expect(result.error).toBe('Session expired — please re-authenticate with Crof');
+    expect(result.error).toBe('Session expired — please re-authenticate with CrofAI');
   });
 
   it('surfaces non-401 API errors with status', async () => {

@@ -5,6 +5,7 @@
 - Settings: added an option to hide starter suggestions on the new-session screen.
 - Shortcuts: fixed a regression where double-Escape could be primed when the current session was not active.
 - Usage: added Crof and NeuralWatt quota tracking, including the missing Crof switch arm that previously fell back to "Unsupported provider".
+- Usage: Crof and NeuralWatt follow-up — fixed NeuralWatt allowance usage math (effectiveLimit now correctly accounts for spent credits), switched NeuralWatt windows to stable map keys with reused i18n labels, removed the speculative wall-clock `computeAllowanceResetAt` fallback (now trusts the API-provided `reset_at` or returns null, matching sibling providers), aligned display name to CrofAI, and added payload-parsing tests for the VS Code runtime.
 
 ## [1.16.3] - 2026-07-22
 

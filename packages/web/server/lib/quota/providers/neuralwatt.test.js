@@ -49,7 +49,7 @@ describe('NeuralWatt quota provider', () => {
     expect(result.ok).toBe(true);
     expect(result.providerId).toBe('neuralwatt');
 
-    const window = result.usage.windows['Standard - month'];
+    const window = result.usage.windows.subscription;
     expect(window).toBeDefined();
     expect(window.usedPercent).toBeCloseTo((13.9023 / 20.0) * 100, 4);
     expect(window.windowSeconds).toBe(30 * 86400);
@@ -74,13 +74,13 @@ describe('NeuralWatt quota provider', () => {
 
     const result = await fetchQuota();
 
-    const window = result.usage.windows['Standard - year'];
+    const window = result.usage.windows.subscription;
     expect(window).toBeDefined();
     expect(window.windowSeconds).toBe(365 * 86400);
     expect(window.resetAt).toBe(Date.parse('2027-04-11T05:05:25Z'));
   });
 
-  it('marks in-overage subscription as exhausted (100% with label), still shows credits', async () => {
+  it('marks in-overage subscription as 100%, still shows credits', async () => {
     const payload = {
       ...DOCUMENTED_SUBSCRIPTION_PAYLOAD,
       subscription: { ...DOCUMENTED_SUBSCRIPTION_PAYLOAD.subscription, in_overage: true, kwh_used: 25.0 },
@@ -89,11 +89,9 @@ describe('NeuralWatt quota provider', () => {
 
     const result = await fetchQuota();
 
-    // Subscription is still shown, but as exhausted
-    const window = result.usage.windows['Standard - month'];
+    const window = result.usage.windows.subscription;
     expect(window).toBeDefined();
     expect(window.usedPercent).toBe(100);
-    expect(window.valueLabel).toBe('(exhausted)');
     // Allowance is null, so credits_balance is independently surfaced
     expect(result.usage.windows.credits_balance.valueLabel).toBe('$32.68');
   });
@@ -104,7 +102,7 @@ describe('NeuralWatt quota provider', () => {
       balance: { credits_remaining_usd: 200 }, // > limit so effectiveLimit = limit = 100
       key: {
         name: 'Prod',
-        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false },
+        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false, reset_at: '2026-08-01T00:00:00Z' },
       },
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(payload)));
@@ -112,79 +110,101 @@ describe('NeuralWatt quota provider', () => {
     const result = await fetchQuota();
 
     // Subscription window with kWh data
-    const subWindow = result.usage.windows['Standard - month'];
+    const subWindow = result.usage.windows.subscription;
     expect(subWindow).toBeDefined();
     expect(subWindow.usedPercent).toBeCloseTo((13.9023 / 20.0) * 100, 4);
 
-    // Allowance window (independent of subscription)
-    const allowWindow = result.usage.windows['Prod key - monthly'];
+    // Allowance window (independent of subscription). Effective limit =
+    // min(100, 200+25) = 100, so 25/100 = 25%.
+    const allowWindow = result.usage.windows.key_allowance;
     expect(allowWindow).toBeDefined();
     expect(allowWindow.usedPercent).toBe(25);
+    expect(allowWindow.resetAt).toBe(Date.parse('2026-08-01T00:00:00Z'));
 
     // credits_balance suppressed because allowance is present
     expect(result.usage.windows.credits_balance).toBeUndefined();
   });
 
-  it('shows exhausted subscription and allowance together, suppresses credits', async () => {
+  it('marks in-overage subscription and allowance together at 100%, suppresses credits', async () => {
     const payload = {
       ...DOCUMENTED_SUBSCRIPTION_PAYLOAD,
       balance: { credits_remaining_usd: 200 },
       subscription: { ...DOCUMENTED_SUBSCRIPTION_PAYLOAD.subscription, in_overage: true },
       key: {
         name: 'Prod',
-        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false },
+        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false, reset_at: '2026-08-01T00:00:00Z' },
       },
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(payload)));
 
     const result = await fetchQuota();
 
-    // Exhausted subscription still shown
-    expect(result.usage.windows['Standard - month'].usedPercent).toBe(100);
-    expect(result.usage.windows['Standard - month'].valueLabel).toBe('(exhausted)');
-    // Allowance still shown
-    expect(result.usage.windows['Prod key - monthly']).toBeDefined();
+    // In-overage subscription → 100%
+    expect(result.usage.windows.subscription.usedPercent).toBe(100);
+    // Allowance still shown with its own percentage
+    expect(result.usage.windows.key_allowance).toBeDefined();
+    expect(result.usage.windows.key_allowance.usedPercent).toBe(25);
     // credits_balance suppressed
     expect(result.usage.windows.credits_balance).toBeUndefined();
   });
 
-  it('uses allowance effective limit = min(limit, credits_remaining) when both present', async () => {
+  it('uses allowance effective limit = min(limit, credits_remaining + spent) when all present', async () => {
     const payload = {
       balance: { credits_remaining_usd: 30 },
       subscription: null,
       key: {
         name: 'prod-key',
-        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false },
+        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false, reset_at: '2026-08-01T00:00:00Z' },
       },
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(payload)));
 
     const result = await fetchQuota();
 
-    const window = result.usage.windows['Prod-key key - monthly'];
+    const window = result.usage.windows.key_allowance;
     expect(window).toBeDefined();
-    // effectiveLimit = min(100, 30) = 30; usedPercent = 25/30 * 100 = 83.33...
-    expect(window.usedPercent).toBeCloseTo((25 / 30) * 100, 4);
+    // effectiveLimit = min(100, 30+25) = 55; usedPercent = 25/55 * 100 ≈ 45.4545
+    expect(window.usedPercent).toBeCloseTo((25 / 55) * 100, 4);
     expect(window.windowSeconds).toBe(30 * 86400);
+    expect(window.resetAt).toBe(Date.parse('2026-08-01T00:00:00Z'));
     expect(result.usage.windows.credits_balance).toBeUndefined();
   });
 
-  it('marks blocked allowance as 100% with (blocked) label', async () => {
+  it('binds allowance ceiling to limit when limit < credits_remaining + spent', async () => {
+    const payload = {
+      balance: { credits_remaining_usd: 200 },
+      subscription: null,
+      key: {
+        name: 'prod-key',
+        // Credits wallet has plenty of headroom (200+25=225 > 100), so the contract
+        // limit is the binding constraint and effectiveLimit = 100.
+        allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false, reset_at: '2026-08-01T00:00:00Z' },
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(payload)));
+
+    const result = await fetchQuota();
+
+    const window = result.usage.windows.key_allowance;
+    expect(window).toBeDefined();
+    expect(window.usedPercent).toBe(25);
+  });
+
+  it('marks blocked allowance as 100%', async () => {
     const payload = {
       balance: { credits_remaining_usd: 30 },
       subscription: null,
       key: {
         name: 'sample',
-        allowance: { limit_usd: 50, period: 'monthly', spent_usd: 10, blocked: true },
+        allowance: { limit_usd: 50, period: 'monthly', spent_usd: 10, blocked: true, reset_at: '2026-08-01T00:00:00Z' },
       },
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(payload)));
 
     const result = await fetchQuota();
 
-    const window = result.usage.windows['Sample key - monthly'];
+    const window = result.usage.windows.key_allowance;
     expect(window.usedPercent).toBe(100);
-    expect(window.valueLabel).toBe('(blocked)');
   });
 
   it('falls back to credits_balance when neither subscription nor allowance exists', async () => {
@@ -240,3 +260,4 @@ describe('NeuralWatt quota provider', () => {
     expect(result.usage).toBeNull();
   });
 });
+

@@ -25,27 +25,6 @@ const periodToWindowSeconds = (period) => {
   return null;
 };
 
-const capitalizeFirst = (value) => {
-  if (typeof value !== 'string' || !value) return null;
-  return value.charAt(0).toUpperCase() + value.slice(1);
-};
-
-const computeAllowanceResetAt = (period) => {
-  const now = new Date();
-  if (period === 'daily') {
-    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0);
-  }
-  if (period === 'weekly') {
-    const day = now.getUTCDay();
-    const daysUntilMonday = day === 1 ? 7 : (8 - day) % 7;
-    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday, 0, 0, 0);
-  }
-  if (period === 'monthly') {
-    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0);
-  }
-  return null;
-};
-
 export const isConfigured = () => {
   const auth = readAuthFile();
   const entry = normalizeAuthEntry(getAuthEntry(auth, aliases));
@@ -95,7 +74,6 @@ export const fetchQuota = async () => {
     const subscription = payload?.subscription ?? null;
     const inOverage = Boolean(subscription?.in_overage);
     const allowance = payload?.key?.allowance ?? null;
-    const keyName = payload?.key?.name ?? null;
     const creditsRemaining = toNumber(payload?.balance?.credits_remaining_usd);
 
     const windows = {};
@@ -103,9 +81,7 @@ export const fetchQuota = async () => {
     if (subscription) {
       const kwhIncluded = toNumber(subscription.kwh_included);
       const kwhUsed = toNumber(subscription.kwh_used);
-      const plan = asNonEmptyString(subscription.plan);
       const billingInterval = asNonEmptyString(subscription.billing_interval);
-      const subLabel = [capitalizeFirst(plan), billingInterval].filter(Boolean).join(' - ');
       const usedPercent = inOverage
         ? 100
         : (kwhIncluded !== null && kwhIncluded > 0 && kwhUsed !== null
@@ -113,43 +89,36 @@ export const fetchQuota = async () => {
             : null);
       const subResetAt = toTimestamp(subscription.kwh_reset_date) ?? toTimestamp(subscription.current_period_end);
       const windowSeconds = periodToWindowSeconds(billingInterval);
-      if (subLabel) {
-        windows[subLabel] = toUsageWindow({
-          usedPercent,
-          windowSeconds,
-          resetAt: subResetAt,
-          ...(inOverage ? { valueLabel: '(exhausted)' } : {})
-        });
-      }
+      windows.subscription = toUsageWindow({
+        usedPercent,
+        windowSeconds,
+        resetAt: subResetAt
+      });
     }
 
     if (allowance) {
       const spent = toNumber(allowance.spent_usd);
       const limit = toNumber(allowance.limit_usd);
+      // Credits wallet is reduced by each period's spend before the allowance cap
+      // bites, so the real ceiling is min(limit, creditsRemaining + spent).
+      const effectiveSpent = spent ?? 0;
       const effectiveLimit = limit !== null && creditsRemaining !== null
-        ? Math.min(limit, creditsRemaining)
+        ? Math.min(limit, creditsRemaining + effectiveSpent)
         : (limit ?? creditsRemaining);
       const period = asNonEmptyString(allowance.period);
-      const labelName = asNonEmptyString(keyName);
-      const labelParts = labelName ? [`${capitalizeFirst(labelName)} key`] : [];
-      if (period) labelParts.push(period);
-      const allowLabel = labelParts.join(' - ');
       const blocked = Boolean(allowance.blocked);
       const usedPercent = blocked
         ? 100
         : (spent !== null && effectiveLimit !== null && effectiveLimit > 0
             ? Math.max(0, Math.min(100, (spent / effectiveLimit) * 100))
             : null);
-      const resetAt = toTimestamp(allowance.reset_at) ?? (period ? computeAllowanceResetAt(period) : null);
+      const resetAt = toTimestamp(allowance.reset_at);
       const windowSeconds = period ? periodToWindowSeconds(period) : null;
-      if (allowLabel) {
-        windows[allowLabel] = toUsageWindow({
-          usedPercent,
-          windowSeconds,
-          resetAt,
-          ...(blocked ? { valueLabel: '(blocked)' } : {})
-        });
-      }
+      windows.key_allowance = toUsageWindow({
+        usedPercent,
+        windowSeconds,
+        resetAt
+      });
     } else if (creditsRemaining !== null) {
       windows.credits_balance = toUsageWindow({
         usedPercent: null,
