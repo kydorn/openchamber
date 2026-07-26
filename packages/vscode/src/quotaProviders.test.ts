@@ -24,7 +24,7 @@ const mockResponse = (body: unknown, init: MockResponseInit = {}): Response => (
 } as unknown as Response);
 
 // Documented NeuralWatt payload from https://portal.neuralwatt.com/docs/api/quota.
-// kwh_included=20.0, kwh_used=13.9023, billing_interval="month" (NOT "monthly").
+// plan="standard", kwh_included=20.0, kwh_used=13.9023.
 const DOCUMENTED_SUBSCRIPTION_PAYLOAD = {
   snapshot_at: '2026-04-16T18:30:00Z',
   balance: { credits_remaining_usd: 32.6774, total_credits_usd: 52.34, credits_used_usd: 19.6626, accounting_method: 'energy' },
@@ -36,9 +36,9 @@ const DOCUMENTED_SUBSCRIPTION_PAYLOAD = {
   subscription: {
     plan: 'standard',
     status: 'active',
-    billing_interval: 'month',
+    billing_interval: 'year',
     current_period_start: '2026-04-11T05:05:25Z',
-    current_period_end: '2026-05-11T05:05:25Z',
+    current_period_end: '2027-04-11T05:05:25Z',
     auto_renew: true,
     kwh_included: 20.0,
     kwh_used: 13.9023,
@@ -113,7 +113,7 @@ describe('Crof quota provider (VS Code parity)', () => {
 });
 
 describe('NeuralWatt quota provider (VS Code parity)', () => {
-  test('builds subscription window from documented payload', async () => {
+  test('builds subscription window keyed by plan name (windowSeconds null)', async () => {
     stubFetchReturning(() => Promise.resolve(mockResponse(DOCUMENTED_SUBSCRIPTION_PAYLOAD)));
 
     const result = await fetchQuotaForProvider('neuralwatt');
@@ -121,34 +121,30 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
     assert.equal(result.ok, true);
     assert.equal(result.providerId, 'neuralwatt');
 
-    const window = result.usage!.windows.subscription;
+    // Subscription window is keyed by the plan name; windowSeconds is null
+    // because the API exposes no kWh window start to derive duration from.
+    const window = result.usage!.windows.standard;
     assert.ok(window, 'subscription window should be defined');
     assert.ok(Math.abs((window.usedPercent as number) - (13.9023 / 20.0) * 100) < 1e-2);
-    assert.equal(window.windowSeconds, 30 * 86400);
-    assert.equal(window.resetAt, Date.parse('2026-05-11T05:05:25Z'));
+    assert.equal(window.windowSeconds, null);
+    assert.equal(window.resetAt, Date.parse('2027-04-11T05:05:25Z'));
 
     // allowance is null → credits_balance also surfaced
     assert.ok(result.usage!.windows.credits_balance, 'credits_balance should be defined');
     assert.equal(result.usage!.windows.credits_balance!.valueLabel, '$32.68');
   });
 
-  test('uses yearly windowSeconds for annual billing interval', async () => {
+  test('falls back to plan_limit title when plan is missing', async () => {
     const payload = {
       ...DOCUMENTED_SUBSCRIPTION_PAYLOAD,
-      subscription: {
-        ...DOCUMENTED_SUBSCRIPTION_PAYLOAD.subscription,
-        billing_interval: 'year',
-        current_period_end: '2027-04-11T05:05:25Z',
-      },
+      subscription: { ...DOCUMENTED_SUBSCRIPTION_PAYLOAD.subscription, plan: null },
     };
     stubFetchReturning(() => Promise.resolve(mockResponse(payload)));
 
     const result = await fetchQuotaForProvider('neuralwatt');
 
-    const window = result.usage!.windows.subscription;
-    assert.ok(window);
-    assert.equal(window!.windowSeconds, 365 * 86400);
-    assert.equal(window!.resetAt, Date.parse('2027-04-11T05:05:25Z'));
+    assert.ok(result.usage!.windows.plan_limit);
+    assert.ok(Math.abs((result.usage!.windows.plan_limit!.usedPercent as number) - (13.9023 / 20.0) * 100) < 1e-2);
   });
 
   test('marks in-overage subscription as 100%, still shows credits', async () => {
@@ -160,16 +156,16 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
 
     const result = await fetchQuotaForProvider('neuralwatt');
 
-    const window = result.usage!.windows.subscription;
+    const window = result.usage!.windows.standard;
     assert.ok(window);
     assert.equal(window!.usedPercent, 100);
     assert.equal(result.usage!.windows.credits_balance!.valueLabel, '$32.68');
   });
 
-  test('surfaces both subscription and allowance windows when both are present', async () => {
+  test('surfaces subscription and allowance windows (allowance keyed by period, key name in valueLabel)', async () => {
     const payload = {
       ...DOCUMENTED_SUBSCRIPTION_PAYLOAD,
-      balance: { credits_remaining_usd: 200 }, // credits >= limit so effectiveLimit = limit = 100
+      balance: { credits_remaining_usd: 200 },
       key: {
         name: 'Prod',
         allowance: { limit_usd: 100, period: 'monthly', spent_usd: 25, blocked: false, reset_at: '2026-08-01T00:00:00Z' },
@@ -179,14 +175,16 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
 
     const result = await fetchQuotaForProvider('neuralwatt');
 
-    const subWindow = result.usage!.windows.subscription;
+    const subWindow = result.usage!.windows.standard;
     assert.ok(subWindow);
     assert.ok(Math.abs((subWindow!.usedPercent as number) - (13.9023 / 20.0) * 100) < 1e-2);
 
-    // min(100, 200+25) = 100 → 25/100 = 25%
-    const allowWindow = result.usage!.windows.key_allowance;
+    // Allowance window is keyed by the localized period label ("monthly");
+    // key name flows through valueLabel for identification.
+    const allowWindow = result.usage!.windows.monthly;
     assert.ok(allowWindow);
     assert.equal(allowWindow!.usedPercent, 25);
+    assert.equal(allowWindow!.valueLabel, 'Prod');
     assert.equal(allowWindow!.resetAt, Date.parse('2026-08-01T00:00:00Z'));
 
     assert.equal(result.usage!.windows.credits_balance, undefined);
@@ -205,12 +203,13 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
 
     const result = await fetchQuotaForProvider('neuralwatt');
 
-    const window = result.usage!.windows.key_allowance;
+    const window = result.usage!.windows.monthly;
     assert.ok(window);
     // effectiveLimit = min(100, 30+25) = 55; usedPercent = 25/55 * 100 ≈ 45.4545
     assert.ok(Math.abs((window!.usedPercent as number) - (25 / 55) * 100) < 1e-2);
     assert.equal(window!.windowSeconds, 30 * 86400);
     assert.equal(window!.resetAt, Date.parse('2026-08-01T00:00:00Z'));
+    assert.equal(window!.valueLabel, 'prod-key');
     assert.equal(result.usage!.windows.credits_balance, undefined);
   });
 
@@ -227,12 +226,69 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
 
     const result = await fetchQuotaForProvider('neuralwatt');
 
-    const window = result.usage!.windows.key_allowance;
+    const window = result.usage!.windows.monthly;
     assert.ok(window);
     assert.equal(window!.usedPercent, 25);
   });
 
-  test('marks blocked allowance as 100%', async () => {
+  test('uses weekly as the allowance key when period is weekly', async () => {
+    const payload = {
+      balance: { credits_remaining_usd: 200 },
+      subscription: null,
+      key: {
+        name: 'Prod',
+        allowance: { limit_usd: 100, period: 'weekly', spent_usd: 20, blocked: false, reset_at: '2026-07-04T00:00:00Z' },
+      },
+    };
+    stubFetchReturning(() => Promise.resolve(mockResponse(payload)));
+
+    const result = await fetchQuotaForProvider('neuralwatt');
+
+    const window = result.usage!.windows.weekly;
+    assert.ok(window);
+    assert.equal(window!.windowSeconds, 604800);
+    assert.equal(window!.resetAt, Date.parse('2026-07-04T00:00:00Z'));
+    assert.equal(window!.valueLabel, 'Prod');
+  });
+
+  test('uses daily as the allowance key when period is daily', async () => {
+    const payload = {
+      balance: { credits_remaining_usd: 200 },
+      subscription: null,
+      key: {
+        name: 'Prod',
+        allowance: { limit_usd: 10, period: 'daily', spent_usd: 2, blocked: false, reset_at: '2026-07-04T00:00:00Z' },
+      },
+    };
+    stubFetchReturning(() => Promise.resolve(mockResponse(payload)));
+
+    const result = await fetchQuotaForProvider('neuralwatt');
+
+    const window = result.usage!.windows.daily;
+    assert.ok(window);
+    assert.equal(window!.windowSeconds, 86400);
+    assert.equal(window!.resetAt, Date.parse('2026-07-04T00:00:00Z'));
+  });
+
+  test('falls back to billing_cycle when allowance period is missing or unknown', async () => {
+    const payload = {
+      balance: { credits_remaining_usd: 200 },
+      subscription: null,
+      key: {
+        name: 'Prod',
+        allowance: { limit_usd: 100, period: 'fortnightly', spent_usd: 25, blocked: false, reset_at: '2026-08-01T00:00:00Z' },
+      },
+    };
+    stubFetchReturning(() => Promise.resolve(mockResponse(payload)));
+
+    const result = await fetchQuotaForProvider('neuralwatt');
+
+    const window = result.usage!.windows.billing_cycle;
+    assert.ok(window);
+    assert.equal(window!.usedPercent, 25);
+  });
+
+  test('marks blocked allowance as 100% with valueLabel set', async () => {
     const payload = {
       balance: { credits_remaining_usd: 30 },
       subscription: null,
@@ -245,9 +301,10 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
 
     const result = await fetchQuotaForProvider('neuralwatt');
 
-    const window = result.usage!.windows.key_allowance;
+    const window = result.usage!.windows.monthly;
     assert.ok(window);
     assert.equal(window!.usedPercent, 100);
+    assert.equal(window!.valueLabel, 'sample');
   });
 
   test('falls back to credits_balance when neither subscription nor allowance exists', async () => {

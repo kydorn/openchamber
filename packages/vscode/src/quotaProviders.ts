@@ -1962,6 +1962,7 @@ const fetchNeuralwattQuota = async (): Promise<ProviderResult> => {
     const subscription = payload?.subscription ?? null;
     const inOverage = Boolean(subscription?.in_overage);
     const allowance = payload?.key?.allowance ?? null;
+    const keyName = payload?.key?.name ?? null;
     const creditsRemaining = toNumber(payload?.balance?.credits_remaining_usd);
 
     const windows: Record<string, UsageWindow> = {};
@@ -1969,19 +1970,22 @@ const fetchNeuralwattQuota = async (): Promise<ProviderResult> => {
     if (subscription) {
       const kwhIncluded = toNumber(subscription.kwh_included);
       const kwhUsed = toNumber(subscription.kwh_used);
-      const billingInterval = typeof subscription.billing_interval === 'string' && subscription.billing_interval.trim()
-        ? subscription.billing_interval.trim()
+      const plan = typeof subscription.plan === 'string' && subscription.plan.trim()
+        ? subscription.plan.trim()
         : null;
+      // Subscription window title is the plan name; subscription limits reset
+      // monthly even on annual billing plans, but the API exposes no kWh window
+      // start to derive windowSeconds — pass null rather than fabricating a guess.
+      const subKey = plan ?? 'plan_limit';
       const usedPercent = inOverage
         ? 100
         : (kwhIncluded !== null && kwhIncluded > 0 && kwhUsed !== null
             ? Math.max(0, Math.min(100, (kwhUsed / kwhIncluded) * 100))
             : null);
       const subResetAt = toTimestamp(subscription.kwh_reset_date) ?? toTimestamp(subscription.current_period_end);
-      const windowSeconds = neuralwattWindowSeconds(billingInterval);
-      windows.subscription = toUsageWindow({
+      windows[subKey] = toUsageWindow({
         usedPercent,
-        windowSeconds,
+        windowSeconds: null,
         resetAt: subResetAt,
       });
     }
@@ -2004,12 +2008,19 @@ const fetchNeuralwattQuota = async (): Promise<ProviderResult> => {
         : (spent !== null && effectiveLimit !== null && effectiveLimit > 0
             ? Math.max(0, Math.min(100, (spent / effectiveLimit) * 100))
             : null);
+      // Window title is the localized period label (daily/weekly/monthly); key
+      // name is attached via valueLabel for identification (wafer precedent).
+      const periodKey = (period === 'daily' || period === 'weekly' || period === 'monthly' || period === 'month')
+        ? (period === 'month' ? 'monthly' : period)
+        : 'billing_cycle';
+      const labelName = typeof keyName === 'string' && keyName.trim() ? keyName.trim() : null;
       const resetAt = toTimestamp(allowance.reset_at);
       const windowSeconds = period ? neuralwattWindowSeconds(period) : null;
-      windows.key_allowance = toUsageWindow({
+      windows[periodKey] = toUsageWindow({
         usedPercent,
         windowSeconds,
         resetAt,
+        ...(labelName ? { valueLabel: labelName } : {}),
       });
     } else if (creditsRemaining !== null) {
       windows.credits_balance = toUsageWindow({
