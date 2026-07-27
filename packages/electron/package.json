@@ -78,6 +78,7 @@
       }
     ],
     "afterPack": "scripts/after-pack.cjs",
+    "afterAllArtifactBuild": "scripts/embed-appimage-update-info.cjs",
     "directories": {
       "buildResources": "resources/icons",
       "output": "dist"
