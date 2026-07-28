@@ -71,6 +71,17 @@ html[data-oc-vibrancy] .main-content-safe-area {
   background-color: transparent !important;
 }
 
+/* ── Linux frameless window border ────────────────────────────────────────
+   `data-oc-window-border` is set on <html> by initLinuxWindowBorder()
+   (ui/src/lib/desktop.ts), and `data-oc-window-maximized` drops the border
+   so a maximized window stays flush with screen edges. Rounded corners
+   were removed: Electron 41's transparent-window path on Linux is unreliable
+   without --disable-gpu, and native rounded corners landed upstream only in
+   Electron 43 (PR #51459). */
+html[data-oc-window-border]:not([data-oc-window-maximized]) #root {
+  border: 1px solid var(--border);
+}
+
 /* Left sidebar: solid until the native layer is ready, then a translucent
    overlay so the vibrancy frosts through. */
 html[data-oc-vibrancy] .oc-vibrancy-surface {

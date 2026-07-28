@@ -6,6 +6,7 @@ import {
   normalizeDesktopWindowControlsPosition,
   resolveDesktopWindowControlsSide,
 } from './desktop';
+import { useUIStore } from '@/stores/useUIStore';
 
 describe('desktop window controls position', () => {
   test('defaults to right', () => {
@@ -28,5 +29,26 @@ describe('desktop window controls position', () => {
 
   test('right uses Windows order', () => {
     expect(getDesktopWindowControlsOrder('right')).toEqual(['minimize', 'maximize', 'close']);
+  });
+});
+
+describe('useUIStore v12→v13 migration', () => {
+  test('introduces classic style while preserving position', () => {
+    const migrate = useUIStore.persist.getOptions().migrate!;
+    const result = migrate({ desktopWindowControlsPosition: 'left' }, 12) as Record<string, unknown>;
+    expect(result.desktopWindowControlsPosition).toBe('left');
+    expect(result.desktopWindowControlsStyle).toBe('classic');
+  });
+
+  test('does not overwrite a persisted style', () => {
+    const migrate = useUIStore.persist.getOptions().migrate!;
+    const result = migrate({ desktopWindowControlsStyle: 'traffic-lights' }, 12) as Record<string, unknown>;
+    expect(result.desktopWindowControlsStyle).toBe('traffic-lights');
+  });
+
+  test('coerces an invalid persisted style to classic', () => {
+    const migrate = useUIStore.persist.getOptions().migrate!;
+    const result = migrate({ desktopWindowControlsStyle: 'macos' }, 12) as Record<string, unknown>;
+    expect(result.desktopWindowControlsStyle).toBe('classic');
   });
 });

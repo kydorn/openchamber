@@ -41,6 +41,7 @@ export type SkillCatalogConfig = {
 export type DesktopWindowControlsPosition = 'left' | 'right';
 export type DesktopWindowControlsSide = 'left' | 'right';
 export type DesktopWindowControlAction = 'close' | 'minimize' | 'maximize';
+export type DesktopWindowControlsStyle = 'classic' | 'traffic-lights';
 
 export type DesktopSettings = {
   themeId?: string;
@@ -142,6 +143,7 @@ export type DesktopSettings = {
   pwaOrientation?: 'system' | 'portrait' | 'landscape';
   mobileKeyboardMode?: MobileKeyboardMode;
   desktopWindowControlsPosition?: DesktopWindowControlsPosition;
+  desktopWindowControlsStyle?: DesktopWindowControlsStyle;
   inputSpellcheckEnabled?: boolean;
   showOpenCodeUpdateNotifications?: boolean;
   agentControlToolEnabled?: boolean;
@@ -250,9 +252,6 @@ export const getElectronPlatform = (): string | null => {
   return typeof platform === 'string' ? platform : null;
 };
 
-/** Width of the three in-app window control buttons when placed on the left (3 × w-8). */
-export const DESKTOP_WINDOW_CONTROLS_WIDTH_PX = 96;
-
 /** Default side for in-app window controls (Windows-style, right). */
 export const DEFAULT_DESKTOP_WINDOW_CONTROLS_POSITION: DesktopWindowControlsPosition = 'right';
 
@@ -297,6 +296,37 @@ export const getDesktopWindowControlsOrder = (
 
 export const hasDesktopInvoke = (): boolean => {
   return typeof getDesktopBridge()?.invoke === 'function';
+};
+
+/**
+ * Linux frameless Electron windows show a 1px CSS border on #root (see
+ * index.css). This function flips the attribute on <html> so the rule
+ * matches, and tracks `data-oc-window-maximized` so the border drops when
+ * maximized (a 1px line inset from every screen edge would look off).
+ * No-op outside Linux frameless Electron.
+ */
+export const initLinuxWindowBorder = (): void => {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (!usesFramelessElectronChrome()) return;
+  const platform = getElectronPlatform();
+  if (platform !== 'linux') return;
+
+  const root = document.documentElement;
+  root.setAttribute('data-oc-window-border', '');
+
+  const applyMaximized = (maximized: boolean) => {
+    root.toggleAttribute('data-oc-window-maximized', maximized);
+  };
+
+  void invokeDesktop<{ maximized?: boolean }>('desktop_get_current_window_state')
+    .then((state) => applyMaximized(Boolean(state?.maximized)))
+    .catch(() => {});
+
+  const onMaximizedChange = (event: Event) => {
+    const detail = (event as CustomEvent<{ maximized?: boolean }>).detail;
+    applyMaximized(Boolean(detail?.maximized));
+  };
+  window.addEventListener('openchamber:window-maximized-changed', onMaximizedChange);
 };
 
 export const canUseElectronDesktopIPC = (): boolean => isElectronShell() && hasDesktopInvoke();

@@ -557,6 +557,7 @@ const materializeAuthoritativeUiSettings = (settings: DesktopSettings): DesktopS
     timeFormatPreference: defaults.timeFormatPreference,
     weekStartPreference: defaults.weekStartPreference,
     desktopWindowControlsPosition: defaults.desktopWindowControlsPosition,
+    desktopWindowControlsStyle: defaults.desktopWindowControlsStyle,
     chatRenderMode: defaults.chatRenderMode,
     activityRenderMode: defaults.activityRenderMode,
     mermaidRenderingMode: defaults.mermaidRenderingMode,
@@ -746,6 +747,16 @@ const applyDesktopUiPreferences = (settings: DesktopSettings) => {
         : null;
     if (nextPosition && nextPosition !== store.desktopWindowControlsPosition) {
       store.setDesktopWindowControlsPosition(nextPosition);
+    }
+  }
+  if (typeof settings.desktopWindowControlsStyle === 'string') {
+    const nextStyle = settings.desktopWindowControlsStyle === 'traffic-lights'
+      ? 'traffic-lights'
+      : settings.desktopWindowControlsStyle === 'classic'
+        ? 'classic'
+        : null;
+    if (nextStyle && nextStyle !== store.desktopWindowControlsStyle) {
+      store.setDesktopWindowControlsStyle(nextStyle);
     }
   }
   if (typeof settings.chatRenderMode === 'string'
@@ -1377,6 +1388,11 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
     ) {
       // Legacy "auto" never read OS chrome config; treat as right.
       result.desktopWindowControlsPosition = 'right';
+    }
+  }
+  if (typeof candidate.desktopWindowControlsStyle === 'string') {
+    if (candidate.desktopWindowControlsStyle === 'classic' || candidate.desktopWindowControlsStyle === 'traffic-lights') {
+      result.desktopWindowControlsStyle = candidate.desktopWindowControlsStyle;
     }
   }
   if (typeof candidate.chatRenderMode === 'string'

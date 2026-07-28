@@ -22,6 +22,7 @@ export type SessionRetentionAction = 'archive' | 'delete';
 export type TimeFormatPreference = 'auto' | '12h' | '24h';
 export type WeekStartPreference = 'auto' | 'sunday' | 'monday';
 export type DesktopWindowControlsPosition = 'left' | 'right';
+export type DesktopWindowControlsStyle = 'classic' | 'traffic-lights';
 export type FileEditorKeymap = 'default' | 'vim';
 
 function normalizeFileEditorKeymap(value: unknown): FileEditorKeymap {
@@ -691,6 +692,7 @@ interface UIStore {
   timeFormatPreference: TimeFormatPreference;
   weekStartPreference: WeekStartPreference;
   desktopWindowControlsPosition: DesktopWindowControlsPosition;
+  desktopWindowControlsStyle: DesktopWindowControlsStyle;
   mermaidRenderingMode: MermaidRenderingMode;
   userMessageRenderingMode: UserMessageRenderingMode;
   collapsibleUserMessages: boolean;
@@ -848,6 +850,7 @@ interface UIStore {
   setTimeFormatPreference: (value: TimeFormatPreference) => void;
   setWeekStartPreference: (value: WeekStartPreference) => void;
   setDesktopWindowControlsPosition: (value: DesktopWindowControlsPosition) => void;
+  setDesktopWindowControlsStyle: (value: DesktopWindowControlsStyle) => void;
   setMermaidRenderingMode: (value: MermaidRenderingMode) => void;
   setUserMessageRenderingMode: (value: UserMessageRenderingMode) => void;
   setCollapsibleUserMessages: (value: boolean) => void;
@@ -996,6 +999,7 @@ export const useUIStore = create<UIStore>()(
         timeFormatPreference: 'auto',
         weekStartPreference: 'auto',
         desktopWindowControlsPosition: 'right',
+        desktopWindowControlsStyle: 'classic',
         mermaidRenderingMode: 'svg',
         userMessageRenderingMode: 'markdown',
         collapsibleUserMessages: true,
@@ -2124,6 +2128,9 @@ export const useUIStore = create<UIStore>()(
         setDesktopWindowControlsPosition: (value) => {
           set({ desktopWindowControlsPosition: value === 'left' ? 'left' : 'right' });
         },
+        setDesktopWindowControlsStyle: (value) => {
+          set({ desktopWindowControlsStyle: value === 'traffic-lights' ? 'traffic-lights' : 'classic' });
+        },
         setMermaidRenderingMode: (value) => {
           set({ mermaidRenderingMode: value });
         },
@@ -2202,7 +2209,7 @@ export const useUIStore = create<UIStore>()(
       {
         name: 'ui-store',
         storage: createDeferredSafeJSONStorage(),
-        version: 12,
+        version: 13,
         migrate: (persistedState, version) => {
           if (!persistedState || typeof persistedState !== 'object') {
             return persistedState;
@@ -2213,6 +2220,15 @@ export const useUIStore = create<UIStore>()(
           if (version < 12) {
             if (state.desktopWindowControlsPosition === 'auto' || state.desktopWindowControlsPosition == null) {
               state.desktopWindowControlsPosition = 'right';
+            }
+          }
+
+          // v12 -> v13: introduce window-controls style. Existing users keep
+          // their persisted position; style defaults to "classic" so no one
+          // suddenly sees traffic lights on upgrade.
+          if (version < 13) {
+            if (state.desktopWindowControlsStyle !== 'classic' && state.desktopWindowControlsStyle !== 'traffic-lights') {
+              state.desktopWindowControlsStyle = 'classic';
             }
           }
 
@@ -2394,6 +2410,7 @@ export const useUIStore = create<UIStore>()(
           timeFormatPreference: state.timeFormatPreference,
           weekStartPreference: state.weekStartPreference,
           desktopWindowControlsPosition: state.desktopWindowControlsPosition,
+          desktopWindowControlsStyle: state.desktopWindowControlsStyle,
           mermaidRenderingMode: state.mermaidRenderingMode,
           userMessageRenderingMode: state.userMessageRenderingMode,
           collapsibleUserMessages: state.collapsibleUserMessages,
