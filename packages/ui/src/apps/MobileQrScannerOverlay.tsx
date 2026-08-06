@@ -94,15 +94,22 @@ export const MobileQrScannerOverlay: React.FC<{ onCancel: () => void }> = ({ onC
   );
 };
 
-export const MobileQrConnectionLoading: React.FC = () => {
+export const MobileQrConnectionLoading: React.FC<{ onCancel?: () => void }> = ({ onCancel }) => {
   const { t } = useI18n();
   return createPortal(
-    <div role="status" className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-5 bg-background px-6 text-foreground">
+    <div className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-5 bg-background px-6 text-foreground">
       <OpenChamberLogo width={96} height={96} isAnimated />
-      <div className="flex items-center gap-2 typography-ui-label text-muted-foreground">
+      {/* role="status" scoped to the spinner text so the live region never
+          contains the interactive cancel control. */}
+      <div role="status" className="flex items-center gap-2 typography-ui-label text-muted-foreground">
         <Icon name="loader-4" className="size-[18px] animate-spin" />
         <span>{t('mobile.connect.connecting')}</span>
       </div>
+      {onCancel ? (
+        <Button type="button" variant="outline" size="lg" className="min-h-12 w-full max-w-sm bg-background" onClick={onCancel}>
+          {t('mobile.instances.cancelEdit')}
+        </Button>
+      ) : null}
     </div>,
     document.body,
   );

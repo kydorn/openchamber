@@ -966,6 +966,14 @@ const switchToTransport = (
   scheduleCandidateRefresh();
 };
 
+// `probeConnectionCandidates` hands back its live relay tunnel on an 'ok' relay
+// result (keepTunnel); the caller either adopts it (switchToTransport) or must
+// close it — an abandoned E2EE WebSocket (heartbeat + reconnect) otherwise stays
+// open for the app's lifetime. Called on cancelled/non-adopting exits only.
+const closeUnusedTransportTunnel = (transport: ChosenTransport): void => {
+  if (transport.kind === 'relay') transport.tunnel?.close();
+};
+
 // The display label of the instance cold-launch auto-connect will try (the
 // most-recently-used saved connection) — shown on the launch splash while the
 // connect races run. Null when there is nothing to auto-connect to.
@@ -983,13 +991,20 @@ export const getAutoConnectTargetLabel = (): string | null => {
 // instance, it's unreachable, or it needs a (re)login. No prompts or UI state.
 export type AutoConnectOutcome =
   | { status: 'connected' }
-  /** No saved instance / no saved token — nothing to report to the user. */
+  /** Nothing to report to the user: no saved instance/token, or the auto-connect
+    was cancelled by the user (callers that may cancel must check their own
+    cancellation flag rather than reading meaning from this status). */
   | { status: 'no-candidate' }
   | { status: 'unreachable'; label: string }
   /** The saved token was rejected (expired/revoked) — the user must sign in again. */
   | { status: 'needs-login'; label: string };
 
-export const autoConnectLastInstance = async (): Promise<AutoConnectOutcome> => {
+// `shouldCancel` lets the caller abort a user-cancelled auto-connect: the probe
+// itself is bounded (fast budget) and cannot be interrupted mid-request, so the
+// predicate is only consulted at the decision point, right before the runtime
+// is switched — a cancel must never let a late 'connected' hijack the screen.
+export const autoConnectLastInstance = async (options?: { shouldCancel?: () => boolean }): Promise<AutoConnectOutcome> => {
+  const isCancelled = (): boolean => options?.shouldCancel?.() === true;
   await migrateLegacyInlineTokens();
   const candidate = readConnections()[0]; // sorted most-recent-first
   if (!candidate) return { status: 'no-candidate' };
@@ -1017,9 +1032,21 @@ export const autoConnectLastInstance = async (): Promise<AutoConnectOutcome> => 
   const result = await probeConnectionCandidates(candidate.candidates, token, { fast: true });
   if (result.status === 'needs-login') return { status: 'needs-login', label: candidate.label };
   if (result.status !== 'ok') return { status: 'unreachable', label: candidate.label };
-  await upsertMobileConnection({ id: candidate.id, label: candidate.label, candidates: candidate.candidates }); // bump lastUsedAt (keeps token)
-  switchToTransport(result.transport, token, { runtimeKey: secureTokenKeyOf(candidate) });
-  return { status: 'connected' };
+
+  // A cancel at any point before the switch must neither persist the attempt
+  // nor connect. The probe may have handed back a live relay tunnel; the finally
+  // closes it unless switchToTransport adopted it, so guards stay side-effect-free.
+  let adoptedTunnel = false;
+  try {
+    if (isCancelled()) return { status: 'no-candidate' };
+    await upsertMobileConnection({ id: candidate.id, label: candidate.label, candidates: candidate.candidates }); // bump lastUsedAt (keeps token)
+    if (isCancelled()) return { status: 'no-candidate' };
+    switchToTransport(result.transport, token, { runtimeKey: secureTokenKeyOf(candidate) });
+    adoptedTunnel = true;
+    return { status: 'connected' };
+  } finally {
+    if (!adoptedTunnel && result.status === 'ok') closeUnusedTransportTunnel(result.transport);
+  }
 };
 
 export const validateMobileConnectionSession = async (input: {
@@ -1335,6 +1362,8 @@ export type UseMobileConnection = {
   error: string | null;
   pendingConnection: MobilePendingConnection | null;
   connect: (input: MobileConnectInput) => Promise<void>;
+  /** Abort an in-flight connect so the user can pick another instance. */
+  cancelConnect: () => void;
   redeemPairingConnection: (payload: PairingConnectionPayload) => Promise<void>;
   submitPassword: (password: string) => Promise<void>;
   cancelPassword: () => void;
@@ -1354,6 +1383,10 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
   const connectionsRef = React.useRef(connections);
   const busyRef = React.useRef<'connect' | 'password' | 'pairing' | null>(null);
   const passwordOperationRef = React.useRef(createMobilePasswordOperationTracker());
+  // Dates the connect attempt so `cancelConnect` can invalidate a still-in-flight
+  // probe. The probe itself (bounded) keeps running but its result is discarded:
+  // nothing may switch the runtime or bump the UI after the user cancelled.
+  const connectOperationRef = React.useRef(createMobilePasswordOperationTracker());
 
   const applyConnections = React.useCallback((next: MobileSavedConnection[]) => {
     connectionsRef.current = next;
@@ -1391,6 +1424,9 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
   const connect = React.useCallback(async (input: MobileConnectInput) => {
     setError(null);
     beginBusy('connect');
+    const operation = connectOperationRef.current.begin();
+    // A cancelled attempt must not switch the runtime or surface a late error.
+    const isCurrentOperation = () => connectOperationRef.current.isCurrent(operation);
     try {
       const candidates = buildCandidatesFromInput(input);
       if (candidates.length === 0) {
@@ -1413,40 +1449,57 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
           token = saved?.clientToken;
         }
       }
+      if (!isCurrentOperation()) return;
 
       logConnect('connect:start', { candidates: candidates.map((c) => c.kind), hasToken: Boolean(token) });
       const result = await probeConnectionCandidates(candidates, token);
       logConnect('connect:probe', { status: result.status });
 
-      if (result.status === 'unreachable') {
-        setError(t('mobile.connect.error.unreachable'));
-        return;
-      }
-      if (result.status === 'needs-login') {
-        persistMetadata({ id: saved?.id, label, candidates });
-        setPendingConnection({
-          id: saved?.id ?? crypto.randomUUID(),
-          label,
-          candidates,
-          relay: relayCandidateOf({ candidates }) ?? undefined,
-          relayGrant: grant,
-        });
-        return;
-      }
+      // Pure check: did a newer connect() or a user cancel supersede this attempt?
+      const isSuperseded = (): boolean => !isCurrentOperation();
 
-      // Connected. Persist a user-supplied token before switching so a cold
-      // restart won't re-prompt.
-      if (token && tokenIsNew && isCapacitorApp()) {
-        await writeSecureToken(secureTokenKeyOf({ candidates }), token);
+      // The probe may hand back a live relay tunnel. Every exit from here either
+      // adopts it (switchToTransport) or stops early; the finally closes it in
+      // one place so the guards stay side-effect-free.
+      let adoptedTunnel = false;
+      try {
+        if (isSuperseded()) return;
+        if (result.status === 'unreachable') {
+          setError(t('mobile.connect.error.unreachable'));
+          return;
+        }
+        if (result.status === 'needs-login') {
+          persistMetadata({ id: saved?.id, label, candidates });
+          setPendingConnection({
+            id: saved?.id ?? crypto.randomUUID(),
+            label,
+            candidates,
+            relay: relayCandidateOf({ candidates }) ?? undefined,
+            relayGrant: grant,
+          });
+          return;
+        }
+
+        // Connected. Persist a user-supplied token before switching so a cold
+        // restart won't re-prompt.
+        if (token && tokenIsNew && isCapacitorApp()) {
+          await writeSecureToken(secureTokenKeyOf({ candidates }), token);
+          if (isSuperseded()) return;
+        }
+        persistMetadata({ id: saved?.id, label, candidates, clientToken: token });
+        if (isSuperseded()) return;
+        switchToTransport(result.transport, token ?? null, { runtimeKey: secureTokenKeyOf({ candidates }), grant });
+        adoptedTunnel = true;
+        onConnected();
+      } finally {
+        if (!adoptedTunnel && result.status === 'ok') closeUnusedTransportTunnel(result.transport);
       }
-      persistMetadata({ id: saved?.id, label, candidates, clientToken: token });
-      switchToTransport(result.transport, token ?? null, { runtimeKey: secureTokenKeyOf({ candidates }), grant });
-      onConnected();
     } catch (error) {
+      if (!isCurrentOperation()) return;
       console.warn('[mobile-connect] connect threw', error);
       setError(t('mobile.connect.error.invalidUrl'));
     } finally {
-      endBusy('connect');
+      if (isCurrentOperation()) endBusy('connect');
     }
   }, [beginBusy, endBusy, onConnected, persistMetadata, t]);
 
@@ -1680,6 +1733,12 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
     return removed;
   }, [applyConnections]);
 
+  const cancelConnect = React.useCallback(() => {
+    connectOperationRef.current.cancel();
+    endBusy('connect');
+    setError(null);
+  }, [endBusy]);
+
   return {
     connections,
     isBusy: busyOperation !== null,
@@ -1687,6 +1746,7 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
     error,
     pendingConnection,
     connect,
+    cancelConnect,
     redeemPairingConnection,
     submitPassword,
     cancelPassword,

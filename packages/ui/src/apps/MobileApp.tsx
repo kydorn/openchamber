@@ -635,6 +635,14 @@ export function MobileApp({ apis }: MobileAppProps) {
   // splash so we don't flash the connect screen; 'done' means we either connected or
   // exhausted the attempt (then the connect screen shows).
   const [autoConnectPhase, setAutoConnectPhase] = React.useState<'pending' | 'attempting' | 'done'>('pending');
+  // Set when the user taps "Use another server" on the auto-connect splash. The
+  // in-flight probe keeps running (unabortable, bounded) but its outcome is
+  // ignored and any late success must not switch the runtime behind the screen.
+  const autoConnectCancelledRef = React.useRef(false);
+  const cancelAutoConnect = React.useCallback(() => {
+    autoConnectCancelledRef.current = true;
+    setAutoConnectPhase('done');
+  }, []);
   // Why the cold-launch auto-connect fell through to the connect screen.
   const [autoConnectNotice, setAutoConnectNotice] = React.useState<MobileConnectionNotice | null>(null);
   // The instance the splash says we are connecting to. Read once on mount —
@@ -660,7 +668,7 @@ export function MobileApp({ apis }: MobileAppProps) {
       // saved instance instead of dead-ending on the connect screen until the
       // user restarts the app. Success fires runtime-endpoint-changed, which
       // re-bootstraps everything.
-      void autoConnectLastInstance();
+      void autoConnectLastInstance({ shouldCancel: () => autoConnectCancelledRef.current });
       return;
     }
 
@@ -800,10 +808,10 @@ export function MobileApp({ apis }: MobileAppProps) {
     }
     let cancelled = false;
     setAutoConnectPhase('attempting');
-    void autoConnectLastInstance()
+    void autoConnectLastInstance({ shouldCancel: () => cancelled || autoConnectCancelledRef.current })
       .catch((): AutoConnectOutcome => ({ status: 'no-candidate' }))
       .then((outcome) => {
-        if (cancelled) return;
+        if (cancelled || autoConnectCancelledRef.current) return;
         // Landing on the connect screen silently reads as data loss — say WHY
         // the saved instance didn't come back (unreachable vs revoked auth).
         if (outcome.status === 'unreachable') {
@@ -853,8 +861,8 @@ export function MobileApp({ apis }: MobileAppProps) {
       // 'no-connection': at cold start the runtime key may not map to a saved
       // connection yet — fall back to the auto-connect path, which both
       // classifies the failure and connects when everything is actually fine.
-      const fallback = await autoConnectLastInstance().catch((): AutoConnectOutcome => ({ status: 'no-candidate' }));
-      if (cancelled || fallback.status === 'connected') return;
+      const fallback = await autoConnectLastInstance({ shouldCancel: () => cancelled || autoConnectCancelledRef.current }).catch((): AutoConnectOutcome => ({ status: 'no-candidate' }));
+      if (cancelled || autoConnectCancelledRef.current || fallback.status === 'connected') return;
       if (fallback.status === 'needs-login') {
         dropToConnectScreen({ kind: 'auth-expired', label: fallback.label });
       } else if (fallback.status === 'unreachable') {
@@ -1126,6 +1134,9 @@ export function MobileApp({ apis }: MobileAppProps) {
                   type="button"
                   variant="outline"
                   onClick={() => {
+                    // Mark auto-connect cancelled so a still-running cold-start
+                    // probe (this path or a later resume) cannot switch back.
+                    cancelAutoConnect();
                     switchRuntimeEndpoint({ apiBaseUrl: '', clientToken: null, runtimeKey: 'mobile-disconnected' });
                     setConnectionEpoch((value) => value + 1);
                   }}
@@ -1147,15 +1158,23 @@ export function MobileApp({ apis }: MobileAppProps) {
           <OpenChamberLogo width={120} height={120} isAnimated />
           {/* Absolutely positioned below the (still perfectly centered) logo so
               the text never pushes it up. 50% + half the 120px logo + a gap. */}
-          {autoConnectLabel ? (
-            <div className="absolute inset-x-0 top-[calc(50%+84px)] flex flex-col items-center gap-0.5 px-6 text-center">
-              <p className="typography-small text-muted-foreground">{t('mobile.connect.splash.connectingTo')}</p>
-              <p className="typography-small text-foreground">
-                {autoConnectLabel}
-                <BusyDots />
-              </p>
-            </div>
-          ) : null}
+          <div className="absolute inset-x-0 top-[calc(50%+84px)] flex flex-col items-center gap-4 px-6 text-center">
+            {autoConnectLabel ? (
+              <div className="flex flex-col items-center gap-0.5">
+                <p className="typography-small text-muted-foreground">{t('mobile.connect.splash.connectingTo')}</p>
+                <p className="typography-small text-foreground">
+                  {autoConnectLabel}
+                  <BusyDots />
+                </p>
+              </div>
+            ) : null}
+            {/* The saved instance may be down or slow — let the user bail to the
+                connect screen and pick/scan another instead of waiting out the
+                probe. */}
+            <Button type="button" variant="outline" onClick={cancelAutoConnect}>
+              {t('mobile.connect.cancelPassword')}
+            </Button>
+          </div>
         </main>
       );
     }

@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 
-import { createMobilePasswordOperationTracker, loadMobileConnections, migrateLegacyInlineTokenRecords, upsertMobileConnection, validateMobileConnectionSession, type MobileRelayConfig } from './mobileConnections';
+import { createMobilePasswordOperationTracker, autoConnectLastInstance, loadMobileConnections, migrateLegacyInlineTokenRecords, upsertMobileConnection, validateMobileConnectionSession, type MobileRelayConfig } from './mobileConnections';
 
 const originalFetch = globalThis.fetch;
 const originalWindow = globalThis.window;
@@ -160,6 +160,34 @@ describe('mobile connection storage', () => {
       const relayEntries = connections.filter((c) => c.candidates.some((x) => x.kind === 'relay'));
       expect(relayEntries).toHaveLength(1);
       expect(relayEntries[0]?.label).toBe('Relay renamed');
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+describe('autoConnectLastInstance cancellation', () => {
+  test('a cancelled successful probe must not connect or persist', async () => {
+    installTestWindow();
+    globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/health')) return Response.json({ ok: true });
+      if (url.endsWith('/auth/session')) return Response.json({ authenticated: true, scope: 'client' });
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+    // A saved, token-bearing connection whose probe would succeed — only the
+    // shouldCancel guard should stop it from switching the runtime endpoint.
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([
+      { id: 'inst_A', label: 'A', candidates: [{ kind: 'direct', url: 'https://runtime.example' }], lastUsedAt: 100, clientToken: 'token' },
+    ]));
+
+    try {
+      const outcome = await autoConnectLastInstance({ shouldCancel: () => true });
+
+      expect(outcome.status).toBe('no-candidate');
+      // Cancellation must not bump lastUsedAt (no persistence on a cancelled attempt).
+      const stored = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '[]') as Array<{ lastUsedAt: number }>;
+      expect(stored[0]?.lastUsedAt).toBe(100);
     } finally {
       restoreGlobals();
     }
