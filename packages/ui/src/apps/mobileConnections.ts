@@ -966,6 +966,47 @@ const switchToTransport = (
   scheduleCandidateRefresh();
 };
 
+// `probeConnectionCandidates` hands back its live relay tunnel on an 'ok' relay
+// result (keepTunnel); the caller either adopts it (switchToTransport) or must
+// close it — an abandoned E2EE WebSocket (heartbeat + reconnect) otherwise stays
+// open for the app's lifetime.
+const closeUnusedTransportTunnel = (transport: ChosenTransport): void => {
+  if (transport.kind === 'relay') transport.tunnel?.close();
+};
+
+// The single post-probe completion shared by every successful-probe caller
+// (auto-connect, manual/scan connect, resume/classification re-probe): persist
+// the attempt, then switch the runtime — unless the attempt was
+// superseded/cancelled, in which case the probe's live relay tunnel is closed
+// and nothing is persisted, switched, or reported connected. `onConnected` runs
+// exactly when the runtime was switched. Returns 'connected' | 'cancelled'.
+//
+// `isCancelled` is consulted before the persistence and again after it; the
+// last guard sits in the same synchronous continuation as `switchRuntime`
+// (which must stay synchronous, i.e. call switchToTransport directly), so a
+// cancel can never land in between and switch the runtime behind the user's
+// back. A cancelled attempt never connects and never leaks the tunnel; the
+// persistence itself may already have committed if the cancel landed after it
+// started.
+export const completeConnectAfterProbe = async (input: {
+  result: Extract<ProbeResult, { status: 'ok' }>;
+  isCancelled: () => boolean;
+  persist: () => Promise<unknown>;
+  switchRuntime: () => void;
+  onConnected?: () => void;
+}): Promise<'connected' | 'cancelled'> => {
+  const abandon = (): 'cancelled' => {
+    closeUnusedTransportTunnel(input.result.transport);
+    return 'cancelled';
+  };
+  if (input.isCancelled()) return abandon();
+  await input.persist();
+  if (input.isCancelled()) return abandon();
+  input.switchRuntime();
+  input.onConnected?.();
+  return 'connected';
+};
+
 // The display label of the instance cold-launch auto-connect will try (the
 // most-recently-used saved connection) — shown on the launch splash while the
 // connect races run. Null when there is nothing to auto-connect to.
@@ -983,13 +1024,20 @@ export const getAutoConnectTargetLabel = (): string | null => {
 // instance, it's unreachable, or it needs a (re)login. No prompts or UI state.
 export type AutoConnectOutcome =
   | { status: 'connected' }
-  /** No saved instance / no saved token — nothing to report to the user. */
+  /** Nothing to report to the user: no saved instance/token, or the auto-connect
+    was cancelled by the user (callers that may cancel must check their own
+    cancellation flag rather than reading meaning from this status). */
   | { status: 'no-candidate' }
   | { status: 'unreachable'; label: string }
   /** The saved token was rejected (expired/revoked) — the user must sign in again. */
   | { status: 'needs-login'; label: string };
 
-export const autoConnectLastInstance = async (): Promise<AutoConnectOutcome> => {
+// `shouldCancel` lets the caller abort a user-cancelled auto-connect: the probe
+// itself is bounded (fast budget) and cannot be interrupted mid-request, so the
+// predicate is only consulted at the decision point, right before the runtime
+// is switched — a cancel must never let a late 'connected' hijack the screen.
+export const autoConnectLastInstance = async (options?: { shouldCancel?: () => boolean }): Promise<AutoConnectOutcome> => {
+  const isCancelled = (): boolean => options?.shouldCancel?.() === true;
   await migrateLegacyInlineTokens();
   const candidate = readConnections()[0]; // sorted most-recent-first
   if (!candidate) return { status: 'no-candidate' };
@@ -1017,9 +1065,18 @@ export const autoConnectLastInstance = async (): Promise<AutoConnectOutcome> => 
   const result = await probeConnectionCandidates(candidate.candidates, token, { fast: true });
   if (result.status === 'needs-login') return { status: 'needs-login', label: candidate.label };
   if (result.status !== 'ok') return { status: 'unreachable', label: candidate.label };
-  await upsertMobileConnection({ id: candidate.id, label: candidate.label, candidates: candidate.candidates }); // bump lastUsedAt (keeps token)
-  switchToTransport(result.transport, token, { runtimeKey: secureTokenKeyOf(candidate) });
-  return { status: 'connected' };
+
+  // A cancel at any point before the switch must neither persist the attempt
+  // nor connect, and every exit after an 'ok' probe must close its live relay
+  // tunnel on cancel — completeConnectAfterProbe owns both, so there is no
+  // branch that can leak the tunnel or switch after the user cancelled.
+  const completion = await completeConnectAfterProbe({
+    result,
+    isCancelled,
+    persist: () => upsertMobileConnection({ id: candidate.id, label: candidate.label, candidates: candidate.candidates }), // bump lastUsedAt (keeps token)
+    switchRuntime: () => switchToTransport(result.transport, token, { runtimeKey: secureTokenKeyOf(candidate) }),
+  });
+  return completion === 'connected' ? { status: 'connected' } : { status: 'no-candidate' };
 };
 
 export const validateMobileConnectionSession = async (input: {
@@ -1163,7 +1220,8 @@ export type ReprobeOutcome = 'switched' | 'unchanged' | 'unreachable' | 'needs-l
 // validates the current transport over its live channel; only if that is dead does
 // it fall through to the lower-priority candidates. 'unchanged' → keep the runtime
 // and just refresh; 'unreachable'/'no-connection' → show the connect screen.
-export const reprobeActiveConnection = async (): Promise<ReprobeOutcome> => {
+export const reprobeActiveConnection = async (options?: { shouldCancel?: () => boolean }): Promise<ReprobeOutcome> => {
+  const isCancelled = (): boolean => options?.shouldCancel?.() === true;
   const active = findActiveConnection();
   if (!active) return 'no-connection';
 
@@ -1183,9 +1241,16 @@ export const reprobeActiveConnection = async (): Promise<ReprobeOutcome> => {
   const higher = currentIndex >= 0 ? active.candidates.slice(0, currentIndex) : active.candidates;
   const better = await probeConnectionCandidates(higher, token, { fast: true });
   if (better.status === 'ok') {
-    await upsertMobileConnection({ id: active.id, label: active.label, candidates: active.candidates });
-    switchToTransport(better.transport, token, { runtimeKey: secureTokenKeyOf(active) });
-    return 'switched';
+    // The user may have cancelled (e.g. Disconnect on the recovery splash)
+    // while this probe ran: completeConnectAfterProbe skips the switch and
+    // closes the probe's live relay tunnel instead.
+    const completion = await completeConnectAfterProbe({
+      result: better,
+      isCancelled,
+      persist: () => upsertMobileConnection({ id: active.id, label: active.label, candidates: active.candidates }),
+      switchRuntime: () => switchToTransport(better.transport, token, { runtimeKey: secureTokenKeyOf(active) }),
+    });
+    return completion === 'connected' ? 'switched' : 'unchanged';
   }
   // The shared token was explicitly rejected — no transport will accept it.
   if (better.status === 'needs-login') return 'needs-login';
@@ -1207,9 +1272,13 @@ export const reprobeActiveConnection = async (): Promise<ReprobeOutcome> => {
   const lower = currentIndex >= 0 ? active.candidates.slice(currentIndex + 1) : [];
   const fallback = await probeConnectionCandidates(lower, token, { fast: true });
   if (fallback.status === 'ok') {
-    await upsertMobileConnection({ id: active.id, label: active.label, candidates: active.candidates });
-    switchToTransport(fallback.transport, token, { runtimeKey: secureTokenKeyOf(active) });
-    return 'switched';
+    const completion = await completeConnectAfterProbe({
+      result: fallback,
+      isCancelled,
+      persist: () => upsertMobileConnection({ id: active.id, label: active.label, candidates: active.candidates }),
+      switchRuntime: () => switchToTransport(fallback.transport, token, { runtimeKey: secureTokenKeyOf(active) }),
+    });
+    return completion === 'connected' ? 'switched' : 'unchanged';
   }
   if (fallback.status === 'needs-login') return 'needs-login';
   return 'unreachable';
@@ -1334,7 +1403,11 @@ export type UseMobileConnection = {
   isPasswordBusy: boolean;
   error: string | null;
   pendingConnection: MobilePendingConnection | null;
+  /** Which saved instance row is currently connecting (null for manual/scan connects). */
+  connectingId: string | null;
   connect: (input: MobileConnectInput) => Promise<void>;
+  /** Abort an in-flight connect so the user can pick another instance. */
+  cancelConnect: () => void;
   redeemPairingConnection: (payload: PairingConnectionPayload) => Promise<void>;
   submitPassword: (password: string) => Promise<void>;
   cancelPassword: () => void;
@@ -1351,9 +1424,17 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
   const [busyOperation, setBusyOperation] = React.useState<'connect' | 'password' | 'pairing' | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [pendingConnection, setPendingConnection] = React.useState<MobilePendingConnection | null>(null);
+  // Which saved instance row is currently connecting (null for manual/scan
+  // connects). Owned here so surfaces stay reactive instead of pairing local
+  // row state with cancelConnect() at every abandon flow.
+  const [connectingId, setConnectingId] = React.useState<string | null>(null);
   const connectionsRef = React.useRef(connections);
   const busyRef = React.useRef<'connect' | 'password' | 'pairing' | null>(null);
   const passwordOperationRef = React.useRef(createMobilePasswordOperationTracker());
+  // Dates the connect attempt so `cancelConnect` can invalidate a still-in-flight
+  // probe. The probe itself (bounded) keeps running but its result is discarded:
+  // nothing may switch the runtime or bump the UI after the user cancelled.
+  const connectOperationRef = React.useRef(createMobilePasswordOperationTracker());
 
   const applyConnections = React.useCallback((next: MobileSavedConnection[]) => {
     connectionsRef.current = next;
@@ -1391,6 +1472,10 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
   const connect = React.useCallback(async (input: MobileConnectInput) => {
     setError(null);
     beginBusy('connect');
+    setConnectingId(input.id ?? null);
+    const operation = connectOperationRef.current.begin();
+    // A cancelled attempt must not switch the runtime or surface a late error.
+    const isCurrentOperation = () => connectOperationRef.current.isCurrent(operation);
     try {
       const candidates = buildCandidatesFromInput(input);
       if (candidates.length === 0) {
@@ -1413,16 +1498,24 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
           token = saved?.clientToken;
         }
       }
+      if (!isCurrentOperation()) return;
 
       logConnect('connect:start', { candidates: candidates.map((c) => c.kind), hasToken: Boolean(token) });
       const result = await probeConnectionCandidates(candidates, token);
       logConnect('connect:probe', { status: result.status });
 
+      // Pure check: did a newer connect() or a user cancel supersede this attempt?
+      const isSuperseded = (): boolean => !isCurrentOperation();
+
+      // Only an 'ok' probe carries a live relay tunnel; completeConnectAfterProbe
+      // owns its lifecycle below (adopts it, or closes it on cancel).
       if (result.status === 'unreachable') {
+        if (isSuperseded()) return;
         setError(t('mobile.connect.error.unreachable'));
         return;
       }
       if (result.status === 'needs-login') {
+        if (isSuperseded()) return;
         persistMetadata({ id: saved?.id, label, candidates });
         setPendingConnection({
           id: saved?.id ?? crypto.randomUUID(),
@@ -1435,18 +1528,34 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
       }
 
       // Connected. Persist a user-supplied token before switching so a cold
-      // restart won't re-prompt.
-      if (token && tokenIsNew && isCapacitorApp()) {
-        await writeSecureToken(secureTokenKeyOf({ candidates }), token);
-      }
-      persistMetadata({ id: saved?.id, label, candidates, clientToken: token });
-      switchToTransport(result.transport, token ?? null, { runtimeKey: secureTokenKeyOf({ candidates }), grant });
-      onConnected();
+      // restart won't re-prompt. The probe tunnel already exists here; if the
+      // token write gets superseded mid-await, stop inside persist (metadata is
+      // not committed) and completeConnectAfterProbe closes the tunnel.
+      await completeConnectAfterProbe({
+        result,
+        isCancelled: isSuperseded,
+        persist: async () => {
+          if (token && tokenIsNew && isCapacitorApp()) {
+            await writeSecureToken(secureTokenKeyOf({ candidates }), token);
+            if (isSuperseded()) return;
+          }
+          persistMetadata({ id: saved?.id, label, candidates, clientToken: token });
+        },
+        switchRuntime: () => switchToTransport(result.transport, token ?? null, { runtimeKey: secureTokenKeyOf({ candidates }), grant }),
+        onConnected,
+      });
+      return;
     } catch (error) {
+      if (!isCurrentOperation()) return;
       console.warn('[mobile-connect] connect threw', error);
       setError(t('mobile.connect.error.invalidUrl'));
     } finally {
-      endBusy('connect');
+      // Only the current operation clears busy and the row indicator: a
+      // superseded attempt must not clobber a newer connect's state.
+      if (isCurrentOperation()) {
+        endBusy('connect');
+        setConnectingId(null);
+      }
     }
   }, [beginBusy, endBusy, onConnected, persistMetadata, t]);
 
@@ -1680,13 +1789,22 @@ export const useMobileConnection = (onConnected: () => void): UseMobileConnectio
     return removed;
   }, [applyConnections]);
 
+  const cancelConnect = React.useCallback(() => {
+    connectOperationRef.current.cancel();
+    endBusy('connect');
+    setConnectingId(null);
+    setError(null);
+  }, [endBusy]);
+
   return {
     connections,
     isBusy: busyOperation !== null,
     isPasswordBusy: busyOperation === 'password',
     error,
     pendingConnection,
+    connectingId,
     connect,
+    cancelConnect,
     redeemPairingConnection,
     submitPassword,
     cancelPassword,

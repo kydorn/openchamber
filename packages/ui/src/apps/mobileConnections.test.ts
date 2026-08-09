@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 
-import { createMobilePasswordOperationTracker, loadMobileConnections, migrateLegacyInlineTokenRecords, upsertMobileConnection, validateMobileConnectionSession, type MobileRelayConfig } from './mobileConnections';
+import { completeConnectAfterProbe, createMobilePasswordOperationTracker, autoConnectLastInstance, loadMobileConnections, migrateLegacyInlineTokenRecords, upsertMobileConnection, validateMobileConnectionSession, type MobileRelayConfig } from './mobileConnections';
 
 const originalFetch = globalThis.fetch;
 const originalWindow = globalThis.window;
@@ -56,6 +56,17 @@ describe('mobile connection storage', () => {
     await completion;
 
     expect(switchedRuntime).toBe(false);
+  });
+
+  test('a newer begin() supersedes the older operation (connect supersede semantics)', () => {
+    const tracker = createMobilePasswordOperationTracker();
+    const first = tracker.begin();
+    const second = tracker.begin();
+    // This is exactly the connect() supersede mechanism: tapping another
+    // instance begins a new operation, so the older attempt's guards
+    // (isCurrent === false) discard its probe result and never switch.
+    expect(tracker.isCurrent(first)).toBe(false);
+    expect(tracker.isCurrent(second)).toBe(true);
   });
 
   test('removes inline tokens only after each secure migration succeeds', async () => {
@@ -160,6 +171,99 @@ describe('mobile connection storage', () => {
       const relayEntries = connections.filter((c) => c.candidates.some((x) => x.kind === 'relay'));
       expect(relayEntries).toHaveLength(1);
       expect(relayEntries[0]?.label).toBe('Relay renamed');
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+describe('completeConnectAfterProbe', () => {
+  const okRelayResult = (closes: { count: number }) => ({
+    status: 'ok' as const,
+    transport: { kind: 'relay' as const, relay: testRelay, tunnel: { close: () => { closes.count += 1; } } },
+  });
+
+  test('persists, switches the runtime and reports connected when active', async () => {
+    const closes = { count: 0 };
+    let persists = 0;
+    let switched = 0;
+    let connected = 0;
+    const completion = await completeConnectAfterProbe({
+      result: okRelayResult(closes) as unknown as Parameters<typeof completeConnectAfterProbe>[0]['result'],
+      isCancelled: () => false,
+      persist: async () => { persists += 1; },
+      switchRuntime: () => { switched += 1; },
+      onConnected: () => { connected += 1; },
+    });
+    expect(completion).toBe('connected');
+    expect(persists).toBe(1);
+    expect(switched).toBe(1);
+    expect(connected).toBe(1);
+    expect(closes.count).toBe(0);
+  });
+
+  test('a superseded attempt neither persists nor switches and closes the tunnel', async () => {
+    const closes = { count: 0 };
+    let persists = 0;
+    let switched = 0;
+    let connected = 0;
+    const completion = await completeConnectAfterProbe({
+      result: okRelayResult(closes) as unknown as Parameters<typeof completeConnectAfterProbe>[0]['result'],
+      isCancelled: () => true,
+      persist: async () => { persists += 1; },
+      switchRuntime: () => { switched += 1; },
+      onConnected: () => { connected += 1; },
+    });
+    expect(completion).toBe('cancelled');
+    expect(persists).toBe(0);
+    expect(switched).toBe(0);
+    expect(connected).toBe(0);
+    expect(closes.count).toBe(1);
+  });
+
+  test('a cancel during the persist await still blocks the switch and closes the tunnel', async () => {
+    const closes = { count: 0 };
+    let persists = 0;
+    let switched = 0;
+    let connected = 0;
+    let cancel = false;
+    const completion = await completeConnectAfterProbe({
+      result: okRelayResult(closes) as unknown as Parameters<typeof completeConnectAfterProbe>[0]['result'],
+      isCancelled: () => cancel,
+      persist: async () => { persists += 1; cancel = true; },
+      switchRuntime: () => { switched += 1; },
+      onConnected: () => { connected += 1; },
+    });
+    expect(completion).toBe('cancelled');
+    expect(persists).toBe(1);
+    expect(switched).toBe(0);
+    expect(connected).toBe(0);
+    expect(closes.count).toBe(1);
+  });
+});
+
+describe('autoConnectLastInstance cancellation', () => {
+  test('a cancelled successful probe must not connect or persist', async () => {
+    installTestWindow();
+    globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/health')) return Response.json({ ok: true });
+      if (url.endsWith('/auth/session')) return Response.json({ authenticated: true, scope: 'client' });
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+    // A saved, token-bearing connection whose probe would succeed — only the
+    // shouldCancel guard should stop it from switching the runtime endpoint.
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([
+      { id: 'inst_A', label: 'A', candidates: [{ kind: 'direct', url: 'https://runtime.example' }], lastUsedAt: 100, clientToken: 'token' },
+    ]));
+
+    try {
+      const outcome = await autoConnectLastInstance({ shouldCancel: () => true });
+
+      expect(outcome.status).toBe('no-candidate');
+      // Cancellation must not bump lastUsedAt (no persistence on a cancelled attempt).
+      const stored = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '[]') as Array<{ lastUsedAt: number }>;
+      expect(stored[0]?.lastUsedAt).toBe(100);
     } finally {
       restoreGlobals();
     }

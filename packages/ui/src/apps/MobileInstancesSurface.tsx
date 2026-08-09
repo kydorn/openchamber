@@ -18,8 +18,8 @@ export const MobileInstancesSurface: React.FC<{
   const { t } = useI18n();
   const conn = useMobileConnection(onConnect);
   const {
-    connections, isBusy, isPasswordBusy, error, pendingConnection,
-    connect, submitPassword, cancelPassword, saveConnection, removeConnection, setError,
+    connections, isBusy, isPasswordBusy, error, pendingConnection, connectingId,
+    connect, cancelConnect, submitPassword, cancelPassword, saveConnection, removeConnection, setError,
   } = conn;
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const editingConnection = editingId ? connections.find((connection) => connection.id === editingId) ?? null : null;
@@ -35,8 +35,6 @@ export const MobileInstancesSurface: React.FC<{
   // The manual add/edit form is hidden until asked for — the sheet leads with
   // the list of instances (with live status), not a wall of inputs.
   const [formOpen, setFormOpen] = React.useState(false);
-  // Which row is being connected to, for the per-row spinner.
-  const [connectingId, setConnectingId] = React.useState<string | null>(null);
 
   // Populate/clear the form imperatively (on edit tap / cancel / save) rather than via
   // an effect keyed on the derived connection object. With an effect, any churn of the
@@ -65,6 +63,7 @@ export const MobileInstancesSurface: React.FC<{
   // the form-reset effect doesn't wipe the scanned values). The user reviews + saves.
   const handleScanInstance = React.useCallback(async () => {
     if (scanAbortRef.current) return;
+    cancelConnect();
     setError(null);
     setIsScanning(true);
     const controller = new AbortController();
@@ -110,7 +109,7 @@ export const MobileInstancesSurface: React.FC<{
         setIsScanning(false);
       }
     }
-  }, [conn, setError, t]);
+  }, [cancelConnect, conn, setError, t]);
 
   React.useEffect(() => () => scanAbortRef.current?.abort(), []);
 
@@ -217,12 +216,17 @@ export const MobileInstancesSurface: React.FC<{
                       type="button"
                       className="flex min-w-0 flex-1 items-center gap-3 px-3.5 py-3 text-left transition-colors active:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary disabled:opacity-60"
                       onClick={() => {
-                        if (isActive) return;
-                        setConnectingId(connection.id);
-                        void connect({ id: connection.id, candidates: connection.candidates, clientToken: connection.clientToken, label: connection.label })
-                          .finally(() => setConnectingId(null));
+                        if (isActive) {
+                          // Selecting the already-connected instance confirms the
+                          // current runtime: abort any in-flight attempt to another
+                          // instance and close the selector.
+                          cancelConnect();
+                          onConnect();
+                          return;
+                        }
+                        void connect({ id: connection.id, candidates: connection.candidates, clientToken: connection.clientToken, label: connection.label });
                       }}
-                      disabled={(isBusy && !isConnectingRow) || confirming}
+                      disabled={confirming || isConnectingRow || (isBusy && !connectingId)}
                     >
                       <span className="relative flex size-9 shrink-0 items-center justify-center rounded-[12px] bg-interactive-hover text-foreground">
                         <Icon name="server" className="size-[18px]" />
@@ -259,6 +263,7 @@ export const MobileInstancesSurface: React.FC<{
                           aria-label={t('mobile.instances.edit')}
                           className="flex size-9 items-center justify-center rounded-full text-muted-foreground transition-colors active:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                           onClick={() => {
+                            cancelConnect();
                             setEditingId(connection.id);
                             setUrl(connectionDisplayUrl(connection));
                             setLabel(connection.label);
@@ -313,7 +318,7 @@ export const MobileInstancesSurface: React.FC<{
                 variant={qrScanSupported ? 'ghost' : 'outline'}
                 size="lg"
                 className="h-12 w-full"
-                onClick={() => { setError(null); setFormOpen(true); }}
+                onClick={() => { cancelConnect(); setError(null); setFormOpen(true); }}
               >
                 <Icon name="add" className="size-[18px]" />
                 {t('mobile.instances.addManual')}

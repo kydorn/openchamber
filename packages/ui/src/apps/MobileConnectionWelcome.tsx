@@ -23,19 +23,23 @@ export const MobileConnectionWelcome: React.FC<{
 }> = ({ onConnected, notice = null }) => {
   const { t } = useI18n();
   const conn = useMobileConnection(onConnected);
-  const { connections, isBusy, isPasswordBusy, error, pendingConnection } = conn;
+  const { connections, isBusy, isPasswordBusy, error, pendingConnection, connectingId, cancelConnect } = conn;
   const [serverUrl, setServerUrl] = React.useState('');
   const [connectionName, setConnectionName] = React.useState('');
   const [clientToken, setClientToken] = React.useState('');
   const [isScanning, setIsScanning] = React.useState(false);
   const [isCompletingScan, setIsCompletingScan] = React.useState(false);
+  // A QR-pairing redeem can't be aborted once the one-time secret is consumed, so
+  // the loading overlay's cancel is only offered for the plain-connect path.
+  const [isScanConnectBusy, setIsScanConnectBusy] = React.useState(false);
   const scanAbortRef = React.useRef<AbortController | null>(null);
+  // Dates each scan so a stale completion (a cancelled scan's late
+  // conn.connect() finally) can't tear down a newer scan's loading overlay.
+  const completingScanGenRef = React.useRef(0);
   const qrScanSupported = React.useMemo(() => isQrScanSupported(), []);
   // QR pairing is the primary flow; the manual URL form stays collapsed unless
   // scanning is unavailable (web build) or the user asks for it.
   const [manualOpen, setManualOpen] = React.useState(() => !isQrScanSupported());
-  // Which saved connection is being connected to, for the per-row spinner.
-  const [connectingId, setConnectingId] = React.useState<string | null>(null);
   const [password, setPassword] = React.useState('');
 
   const handleSubmit = React.useCallback((event: React.FormEvent) => {
@@ -63,11 +67,16 @@ export const MobileConnectionWelcome: React.FC<{
   }, [conn]);
 
   const handleScanQr = React.useCallback(async () => {
-    if (scanAbortRef.current || isBusy) return;
+    if (scanAbortRef.current) return;
+    cancelConnect();
     conn.setError(null);
     setIsScanning(true);
+    setIsScanConnectBusy(false);
     const controller = new AbortController();
     scanAbortRef.current = controller;
+    // A new scan supersedes any prior scan's still-running completion; the
+    // finally only clears the loading overlay when this scan is still current.
+    const completingScanGen = ++completingScanGenRef.current;
     try {
       const result = await scanConnectionQr({ signal: controller.signal });
       if (scanAbortRef.current === controller) {
@@ -77,6 +86,7 @@ export const MobileConnectionWelcome: React.FC<{
       switch (result.status) {
         case 'ok':
           setIsCompletingScan(true);
+          setIsScanConnectBusy(true);
           setServerUrl(result.url);
           if (result.label) setConnectionName(result.label);
           if (result.clientToken) setClientToken(result.clientToken);
@@ -103,13 +113,16 @@ export const MobileConnectionWelcome: React.FC<{
           break;
       }
     } finally {
-      setIsCompletingScan(false);
+      // Only dismiss this scan's loading overlay if a newer scan hasn't since
+      // started: a cancelled scan's late conn.connect() finally must not
+      // unmount a newer scan's overlay mid-connect.
+      if (completingScanGenRef.current === completingScanGen) setIsCompletingScan(false);
       if (scanAbortRef.current === controller) {
         scanAbortRef.current = null;
         setIsScanning(false);
       }
     }
-  }, [conn, isBusy, t]);
+  }, [cancelConnect, conn, t]);
 
   React.useEffect(() => () => scanAbortRef.current?.abort(), []);
 
@@ -123,10 +136,20 @@ export const MobileConnectionWelcome: React.FC<{
     conn.cancelPassword();
   }, [conn]);
 
+  // Abort for a scanning flow that resolved into a plain connect; the loading
+  // overlay dismisses immediately and the probe result is discarded.
+  const handleCancelScanConnect = React.useCallback(() => {
+    setIsScanConnectBusy(false);
+    setIsCompletingScan(false);
+    cancelConnect();
+  }, [cancelConnect]);
+
   return (
     <>
     {isScanning ? <MobileQrScannerOverlay onCancel={() => scanAbortRef.current?.abort()} /> : null}
-    {isCompletingScan ? <MobileQrConnectionLoading /> : null}
+    {isCompletingScan ? (
+      <MobileQrConnectionLoading onCancel={isScanConnectBusy ? handleCancelScanConnect : undefined} />
+    ) : null}
     <main className="oc-keyboard-fill-screen flex min-h-dvh flex-col overflow-y-auto bg-background px-6 pb-[calc(var(--safe-area-inset-bottom,env(safe-area-inset-bottom,0px))+28px)] pt-[calc(var(--safe-area-inset-top,env(safe-area-inset-top,0px))+28px)] text-foreground">
       <div className="m-auto flex w-full max-w-[360px] shrink-0 flex-col items-center gap-9 py-8">
         <div className="flex flex-col items-center gap-5 text-center">
@@ -197,7 +220,7 @@ export const MobileConnectionWelcome: React.FC<{
                   size="lg"
                   className="h-12 w-full"
                   onClick={() => void handleScanQr()}
-                  disabled={isScanning || isBusy}
+                  disabled={isScanning}
                 >
                   <Icon name="scan-2" className={cn('size-[18px]', isScanning && 'animate-pulse')} />
                   {isBusy ? t('mobile.connect.connecting') : t('mobile.connect.scanQr')}
@@ -222,12 +245,10 @@ export const MobileConnectionWelcome: React.FC<{
                       <button
                         key={connection.id}
                         type="button"
-                        disabled={isBusy}
+                        disabled={isConnectingRow || (isBusy && !connectingId)}
                         className="flex min-h-14 w-full items-center gap-3 border-b border-border/70 px-3.5 py-2.5 text-left last:border-b-0 hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary disabled:opacity-70"
                         onClick={() => {
-                          setConnectingId(connection.id);
-                          void conn.connect({ id: connection.id, candidates: connection.candidates, clientToken: connection.clientToken, label: connection.label })
-                            .finally(() => setConnectingId(null));
+                          void conn.connect({ id: connection.id, candidates: connection.candidates, clientToken: connection.clientToken, label: connection.label });
                         }}
                       >
                         <span className="flex size-9 shrink-0 items-center justify-center rounded-[12px] bg-interactive-hover text-foreground">
@@ -256,7 +277,10 @@ export const MobileConnectionWelcome: React.FC<{
               {qrScanSupported ? (
                 <button
                   type="button"
-                  onClick={() => setManualOpen((value) => !value)}
+                  onClick={() => {
+                    cancelConnect();
+                    setManualOpen((value) => !value);
+                  }}
                   aria-expanded={manualOpen}
                   className="mx-auto flex items-center gap-1 rounded-full px-2 py-1 typography-small text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                 >
@@ -306,7 +330,7 @@ export const MobileConnectionWelcome: React.FC<{
                     />
                     <p className="px-1 text-center typography-micro text-muted-foreground">{t('mobile.connect.token.hint')}</p>
                     {error ? <p className="px-1 text-center typography-small text-[var(--status-error)]">{error}</p> : null}
-                    <Button type="submit" variant={qrScanSupported ? 'outline' : 'default'} size="lg" className="h-12 w-full" disabled={isBusy || isScanning || !serverUrl.trim()}>
+                    <Button type="submit" variant={qrScanSupported ? 'outline' : 'default'} size="lg" className="h-12 w-full" disabled={isScanning || !serverUrl.trim()}>
                       {isBusy ? t('mobile.connect.connecting') : t('mobile.connect.connectButton')}
                     </Button>
                   </form>
