@@ -552,7 +552,6 @@ export {
   writeMdFile,
   readConfigFile,
   isPlainObject,
-  readUserConfigLayers,
   readConfigLayers,
   readConfig,
   getConfigForPath,
