@@ -256,6 +256,51 @@ describe('output budget and input reserve', () => {
 
     expect(described.outputTokens).toBe(24_000);
   });
+
+  // Custom providers declare their model limits in the config
+  // (`provider.<id>.models.<model>.limit`), not on models.dev. The budget must
+  // come from there or a 1M-token model looks like the 64k default and blocks
+  // legitimate diffs.
+  describe('config-declared model limits', () => {
+    beforeEach(() => {
+      readConfig.mockReturnValue({
+        provider: {
+          custom: {
+            options: { baseURL: 'https://proxy.example.test/v1', apiKey: 'k' },
+            models: {
+              'glm-5.2': { id: 'glm-5.2', limit: { context: 1_000_000, output: 131_072 } },
+            },
+          },
+        },
+      });
+    });
+
+    it('reads the context budget from the config model record', async () => {
+      const described = await describeSmallModel({
+        directory: '/proj',
+        overrideModel: 'custom/glm-5.2',
+        outputReserveTokens: 96_000,
+      });
+
+      expect(described.contextKnown).toBe(true);
+      expect(described.contextTokens).toBe(1_000_000);
+      expect(described.outputTokenLimit).toBe(131_072);
+      expect(described.inputCharBudget).toBe((1_000_000 - 96_000) * 4);
+    });
+
+    it('caps the requested output tokens by the config output limit', async () => {
+      await generateSmallModelText({
+        prompt: 'x'.repeat(100_000),
+        model: 'custom/glm-5.2',
+        maxOutputTokens: 200_000,
+        directory: '/proj',
+      });
+
+      expect(callSmallModel.mock.calls.at(-1)[0].maxOutputTokens).toBe(131_072);
+      // 100k chars fit comfortably in a 1M-token context: no truncation.
+      expect(callSmallModel.mock.calls.at(-1)[0].prompt).toHaveLength(100_000);
+    });
+  });
 });
 
 describe('listAuthenticatedProviders', () => {

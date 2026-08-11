@@ -50,7 +50,11 @@ other runtime API.
      model resolves anywhere — costlier, but always valid.
 - Input clamp: the prompt is measured against the resolved model's catalog
   `limit.context` (minus an output reserve, ~4 chars/token estimate;
-  conservative default when the model is not in the catalog). `onOverflow`
+  conservative default when the model is not in the catalog). For models
+  declared in the OpenCode config, the config model record's `limit`
+  (`provider.<id>.models.<model>.limit`) is overlaid over the catalog — custom
+  providers declare their real context there and must not be judged by the
+  64k default. `onOverflow`
   decides what an oversized prompt means:
   - `truncate` (default) clips the tail and reports `inputTruncated: true`.
     Correct for callers that degrade gracefully (summaries, commit messages).

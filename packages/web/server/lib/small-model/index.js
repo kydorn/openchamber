@@ -89,6 +89,32 @@ const readConfiguredSmallModel = (workingDirectory) => {
   }
 };
 
+const readMergedConfig = (workingDirectory) => {
+  if (!workingDirectory) return null;
+  try {
+    return readConfig(workingDirectory);
+  } catch {
+    // A malformed config file must not break resolution that does not need it.
+    return null;
+  }
+};
+
+// Config model records (opencode `provider.<id>.models`) can declare limits
+// for models models.dev does not know — custom OpenAI-compatible endpoints
+// especially. Overlay the config's record over the catalog so budget and
+// capability checks see the same numbers OpenCode itself uses.
+const mergeConfigModel = (catalog, config, providerID, modelID) => {
+  const model = config?.provider?.[providerID]?.models?.[modelID];
+  if (!model || typeof model !== 'object') return catalog;
+  return {
+    ...catalog,
+    [providerID]: {
+      ...(catalog?.[providerID] || {}),
+      models: { ...(catalog?.[providerID]?.models || {}), [modelID]: model },
+    },
+  };
+};
+
 /**
  * Generates text with the user's small model, resolved and authenticated
  * entirely server-side from the OpenCode config and auth store.
@@ -134,8 +160,15 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
     );
   }
 
-  const outputTokens = resolveOutputTokens({
+  const mergedCatalog = mergeConfigModel(
     catalog,
+    readMergedConfig(directory),
+    resolved.providerID,
+    resolved.modelID,
+  );
+
+  const outputTokens = resolveOutputTokens({
+    catalog: mergedCatalog,
     providerID: resolved.providerID,
     modelID: resolved.modelID,
     maxOutputTokens,
@@ -143,7 +176,7 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
 
   const clamped = clampPromptToModelLimit({
     prompt: prompt.trim(),
-    catalog,
+    catalog: mergedCatalog,
     providerID: resolved.providerID,
     modelID: resolved.modelID,
     onOverflow,
@@ -152,7 +185,7 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
 
   const text = await callSmallModel({
     auth,
-    catalog,
+    catalog: mergedCatalog,
     workingDirectory: directory,
     providerID: resolved.providerID,
     modelID: resolved.modelID,
@@ -258,18 +291,24 @@ export async function describeSmallModel({ directory, preferredProviderID, prefe
     });
   if (!resolved) return resolved;
 
-  const entry = catalog?.[resolved.providerID]?.models?.[resolved.modelID];
+  const mergedCatalog = mergeConfigModel(
+    catalog,
+    readMergedConfig(directory),
+    resolved.providerID,
+    resolved.modelID,
+  );
+  const entry = mergedCatalog?.[resolved.providerID]?.models?.[resolved.modelID];
   const outputTokenLimit = Number(entry?.limit?.output) > 0 ? Number(entry.limit.output) : null;
   // Two passes: the first only to learn the context, which a caller-supplied
   // reserve function needs before it can answer.
   const { contextTokens, contextKnown } = getModelInputCharBudget({
-    catalog,
+    catalog: mergedCatalog,
     providerID: resolved.providerID,
     modelID: resolved.modelID,
   });
   const reserveTokens = resolveReserveTokens(outputReserveTokens, { contextTokens, outputTokenLimit });
   const { maxChars } = getModelInputCharBudget({
-    catalog,
+    catalog: mergedCatalog,
     providerID: resolved.providerID,
     modelID: resolved.modelID,
     outputReserveTokens: reserveTokens,
