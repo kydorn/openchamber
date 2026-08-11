@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { parseMdFile, writeMdFile } from './shared.js';
+import { parseMdFile, writeMdFile, readUserConfigLayers } from './shared.js';
 import { updateAgent } from './agents.js';
 
 const FIXTURE_DIR = path.join(os.tmpdir(), `openchamber-shared-test-${process.pid}`);
@@ -198,5 +198,50 @@ describe('updateAgent frontmatter preservation', () => {
       temperature: 0.7,
     });
     expect(parsed.body).toBe('Body of strateg.');
+  });
+});
+
+describe('readUserConfigLayers', () => {
+  it('merges config.json, opencode.json, and opencode.jsonc, later files winning', () => {
+    const dir = path.join(FIXTURE_DIR, 'userconfig', 'merge');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      provider: { a: { options: { baseURL: 'http://a' } } },
+      small_model: 'a/model',
+    }));
+    fs.writeFileSync(path.join(dir, 'opencode.json'), JSON.stringify({
+      provider: { b: { options: { baseURL: 'http://b' } } },
+    }));
+    fs.writeFileSync(path.join(dir, 'opencode.jsonc'), JSON.stringify({
+      provider: { c: { options: { baseURL: 'http://c' } } },
+      small_model: 'c/model',
+    }));
+
+    const { config, primary } = readUserConfigLayers([
+      path.join(dir, 'config.json'),
+      path.join(dir, 'opencode.json'),
+      path.join(dir, 'opencode.jsonc'),
+    ]);
+
+    expect(config.provider.a.options.baseURL).toBe('http://a');
+    expect(config.provider.b.options.baseURL).toBe('http://b');
+    expect(config.provider.c.options.baseURL).toBe('http://c');
+    expect(config.small_model).toBe('c/model');
+    expect(primary).toBe(path.join(dir, 'config.json'));
+  });
+
+  it('ignores user files that do not exist', () => {
+    const dir = path.join(FIXTURE_DIR, 'userconfig', 'partial');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'opencode.json'), JSON.stringify({ small_model: 'x/y' }));
+
+    const { config, primary } = readUserConfigLayers([
+      path.join(dir, 'config.json'),
+      path.join(dir, 'opencode.json'),
+      path.join(dir, 'opencode.jsonc'),
+    ]);
+
+    expect(config).toEqual({ small_model: 'x/y' });
+    expect(primary).toBe(path.join(dir, 'opencode.json'));
   });
 });

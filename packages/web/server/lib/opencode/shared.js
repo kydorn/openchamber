@@ -158,15 +158,20 @@ function getConfigPaths(workingDirectory) {
   };
 }
 
-function getPrimaryUserConfigPath(userPaths) {
-  for (const userPath of userPaths) {
-    if (fs.existsSync(userPath)) {
-      return userPath;
-    }
-  }
-
-  return CONFIG_FILE;
-}
+// OpenCode keeps configuration across several user files — a legacy
+// `config.json` plus `opencode.json`/`opencode.jsonc` (JSONC is a superset
+// and both may exist) — and merges them all. Reading only the first
+// existing file silently dropped the others, e.g. a provider defined in
+// `opencode.jsonc` while `opencode.json` also exists. Later files win on
+// conflicting keys; the primary (first existing) path is kept for writes
+// and provenance.
+export const readUserConfigLayers = (userPaths) => {
+  const existing = userPaths.filter((userPath) => fs.existsSync(userPath));
+  return {
+    config: existing.reduce((acc, userPath) => mergeConfigs(acc, readConfigFile(userPath)), {}),
+    primary: existing[0] || CONFIG_FILE,
+  };
+};
 
 function readConfigFile(filePath) {
   if (!filePath || !fs.existsSync(filePath)) {
@@ -211,8 +216,7 @@ function mergeConfigs(base, override) {
 
 function readConfigLayers(workingDirectory) {
   const { userPaths, projectPath, customPath } = getConfigPaths(workingDirectory);
-  const userPath = getPrimaryUserConfigPath(userPaths);
-  const userConfig = readConfigFile(userPath);
+  const { config: userConfig, primary: userPath } = readUserConfigLayers(userPaths);
   const projectConfig = readConfigFile(projectPath);
   const customConfig = readConfigFile(customPath);
   const mergedConfig = mergeConfigs(mergeConfigs(userConfig, projectConfig), customConfig);
@@ -548,6 +552,7 @@ export {
   writeMdFile,
   readConfigFile,
   isPlainObject,
+  readUserConfigLayers,
   readConfigLayers,
   readConfig,
   getConfigForPath,
