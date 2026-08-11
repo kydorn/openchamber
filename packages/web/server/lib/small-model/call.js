@@ -324,7 +324,14 @@ const callMessages = async ({ url, headers, modelID, prompt, system, maxOutputTo
       (part) => part?.type === 'tool_use' && part.name === STRUCTURED_OUTPUT_NAME,
     );
     if (!toolUse || typeof toolUse.input !== 'object' || toolUse.input === null) {
-      throw new Error(`${providerLabel} returned no structured output`);
+      // The provider answered without honoring the forced tool call — a schema
+      // refusal in disguise (some Anthropic-compatible endpoints ignore tools
+      // and reply with prose). Status 422 lets callers like the walkthrough
+      // fall back to asking for JSON in the prompt instead of hard-failing.
+      throw Object.assign(
+        new Error(`${providerLabel} returned no structured output`),
+        { status: 422 },
+      );
     }
     return JSON.stringify(toolUse.input);
   }
@@ -682,12 +689,14 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
     return callGoogle({ apiKey, modelID, prompt, system, maxOutputTokens: tokens, responseSchema, timeoutMs, signal });
   }
 
-  // Everything else: OpenAI-compatible chat completions against the catalog's
-  // base URL for that provider (openai itself included). When a custom provider
-  // is not in the catalog (e.g. a user-configured OpenAI-compatible proxy),
-  // fall back to its baseURL from the OpenCode provider config. The openai
-  // provider also respects provider.openai.options.baseURL — OpenCode itself
-  // uses the same config for all providers including openai.
+  // Everything else: the catalog (or config `npm`) names the wire format.
+  // Most providers are OpenAI-compatible chat completions; providers whose
+  // endpoint speaks the Anthropic wire (e.g. minimax's `/anthropic/v1`)
+  // get the messages format — sending chat/completions to an
+  // Anthropic-compatible URL 404s. When a custom provider is not in the
+  // catalog, fall back to its baseURL from the OpenCode provider config.
+  // The openai provider also respects provider.openai.options.baseURL —
+  // OpenCode itself uses the same config for all providers including openai.
   const provider = getCatalogProvider(catalog, providerID);
   const providerConfigUrl = providerConfig?.baseURL;
   const defaultOpenaiUrl = 'https://api.openai.com/v1';
@@ -700,6 +709,25 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
         : null;
   if (!baseURL) {
     throw new Error(`Provider "${providerID}" has no known API base URL`);
+  }
+
+  const npm = providerConfig?.npm || provider?.npm;
+  if (npm === '@ai-sdk/anthropic') {
+    return callMessages({
+      url: `${baseURL.replace(/\/+$/, '')}/messages`,
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      modelID,
+      prompt,
+      system,
+      maxOutputTokens: tokens,
+      providerLabel: provider?.name || providerID,
+      responseSchema,
+      timeoutMs,
+      signal,
+    });
   }
 
   // Thinking models burn the output budget on reasoning and leave content

@@ -103,6 +103,21 @@ const readMergedConfig = (workingDirectory) => {
 // for models models.dev does not know — custom OpenAI-compatible endpoints
 // especially. Overlay the config's record over the catalog so budget and
 // capability checks see the same numbers OpenCode itself uses.
+//
+// The merge is per key, never whole-record: config records are often stubs
+// (`{ id: 'model' }` with no limit) written to expose a model in pickers, and
+// those must not erase the catalog's limits for the same model. Config wins
+// on keys it actually declares.
+const mergeModelRecords = (catalogEntry, configEntry) => {
+  if (!catalogEntry || typeof catalogEntry !== 'object') return configEntry;
+  if (!configEntry || typeof configEntry !== 'object') return catalogEntry;
+  const merged = { ...catalogEntry };
+  for (const [key, value] of Object.entries(configEntry)) {
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
+};
+
 const mergeConfigModel = (catalog, config, providerID, modelID) => {
   const model = config?.provider?.[providerID]?.models?.[modelID];
   if (!model || typeof model !== 'object') return catalog;
@@ -110,7 +125,10 @@ const mergeConfigModel = (catalog, config, providerID, modelID) => {
     ...catalog,
     [providerID]: {
       ...(catalog?.[providerID] || {}),
-      models: { ...(catalog?.[providerID]?.models || {}), [modelID]: model },
+      models: {
+        ...(catalog?.[providerID]?.models || {}),
+        [modelID]: mergeModelRecords(catalog?.[providerID]?.models?.[modelID], model),
+      },
     },
   };
 };

@@ -300,6 +300,36 @@ describe('output budget and input reserve', () => {
       // 100k chars fit comfortably in a 1M-token context: no truncation.
       expect(callSmallModel.mock.calls.at(-1)[0].prompt).toHaveLength(100_000);
     });
+
+    it('keeps catalog limits when the config model record is a stub', async () => {
+      // Picker-exposure stubs (`{ id: 'x' }` with no limit) must not erase
+      // the models.dev limits for the same model.
+      readConfig.mockReturnValue({
+        provider: {
+          custom: {
+            options: { baseURL: 'https://proxy.example.test/v1', apiKey: 'k' },
+            models: { 'glm-5.2': { id: 'glm-5.2' } },
+          },
+        },
+      });
+      getModelCatalog.mockResolvedValue({
+        custom: {
+          id: 'custom',
+          models: {
+            'glm-5.2': { id: 'glm-5.2', limit: { context: 1_000_000, output: 131_072 } },
+          },
+        },
+      });
+      const described = await describeSmallModel({
+        directory: '/proj',
+        overrideModel: 'custom/glm-5.2',
+        outputReserveTokens: 96_000,
+      });
+
+      // Catalog limit wins where the stub is silent.
+      expect(described.contextTokens).toBe(1_000_000);
+      expect(described.outputTokenLimit).toBe(131_072);
+    });
   });
 });
 

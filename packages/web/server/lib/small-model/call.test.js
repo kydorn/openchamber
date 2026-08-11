@@ -737,6 +737,68 @@ describe('callSmallModel — structured output', () => {
     expect(body.tools[0].input_schema).toEqual(SCHEMA);
   });
 
+  it('uses the Anthropic messages wire format for catalog @ai-sdk/anthropic providers', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        content: [{ type: 'text', text: 'hello from anthropic-compatible' }],
+      }),
+    });
+
+    const text = await callSmallModel({
+      auth: { minimax: { type: 'api', key: 'mm-key' } },
+      catalog: {
+        minimax: {
+          id: 'minimax',
+          name: 'MiniMax',
+          npm: '@ai-sdk/anthropic',
+          api: 'https://api.minimax.io/anthropic/v1',
+        },
+      },
+      workingDirectory: '/proj',
+      providerID: 'minimax',
+      modelID: 'MiniMax-M3',
+      prompt: 'hi',
+    });
+
+    expect(text).toBe('hello from anthropic-compatible');
+    // Anthropic wire, not chat/completions — the endpoint 404s on OpenAI
+    // paths.
+    expect(lastCall(fetchMock).url).toBe('https://api.minimax.io/anthropic/v1/messages');
+    expect(lastCall(fetchMock).init.headers['x-api-key']).toBe('mm-key');
+    expect(lastCall(fetchMock).init.headers['anthropic-version']).toBe('2023-06-01');
+    const body = JSON.parse(lastCall(fetchMock).init.body);
+    expect(body.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('reports a schema request the provider answered with prose as a schema refusal', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        content: [{ type: 'text', text: 'here is the answer in prose' }],
+      }),
+    });
+
+    const error = await callSmallModel({
+      auth: { minimax: { type: 'api', key: 'mm-key' } },
+      catalog: {
+        minimax: { id: 'minimax', npm: '@ai-sdk/anthropic', api: 'https://api.minimax.io/anthropic/v1' },
+      },
+      workingDirectory: '/proj',
+      providerID: 'minimax',
+      modelID: 'MiniMax-M3',
+      prompt: 'hi',
+      responseSchema: SCHEMA,
+    }).then(() => null, (e) => e);
+
+    expect(error).toMatchObject({
+      message: 'minimax returned no structured output',
+      status: 422,
+    });
+  });
+
   it('fails loudly when Anthropic answers with prose instead of the tool call', async () => {
     fetchMock.mockResolvedValue({
       ok: true,

@@ -314,6 +314,32 @@ describe('resolveSmallModel — config-defined providers', () => {
     expect(result).toEqual({ providerID: 'google', modelID: 'gemini-2.5-flash', source: 'config-provider' });
   });
 
+  it('keeps catalog model metadata when the config record is a stub', () => {
+    // Config stubs (`{ id: 'x' }`, no family/limit) are written just to expose
+    // a model in pickers; they must not erase the catalog's own metadata —
+    // family priority would silently stop matching.
+    readConfig.mockReturnValue({
+      provider: {
+        google: {
+          options: { baseURL: 'https://proxy.example.test/v1', apiKey: 'k' },
+          models: {
+            'gemini-2.5-flash': { id: 'gemini-2.5-flash' },
+            'gemini-2.0-flash': { id: 'gemini-2.0-flash' },
+          },
+        },
+      },
+    });
+    const result = resolveSmallModel({
+      auth: {},
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    // Catalog family/release_date survive the stub, so the newest
+    // gemini-flash (2.5) is picked, not the first config entry.
+    expect(result).toEqual({ providerID: 'google', modelID: 'gemini-2.5-flash', source: 'config-provider' });
+  });
+
   it('prefers a config-defined provider over the legacy Copilot alias fallback', () => {
     readConfig.mockReturnValue(customProvider());
     const result = resolveSmallModel({

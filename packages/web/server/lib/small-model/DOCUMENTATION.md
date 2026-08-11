@@ -38,8 +38,10 @@ other runtime API.
       credentials, selection was the only missing piece. An `{env:NAME}`
       apiKey counts only when the variable is set, so a dangling reference
       falls through instead of shadowing a working fallback with a
-      call-time error. Config models
-      override catalog models of the same id; family priority applies, first
+      call-time error. Config model records merge over the catalog **per
+      key**: config values win where declared, but picker-exposure stubs
+      (`{ id: 'x' }` with no limit) keep the catalog's limits, family, and
+      release date. Family priority applies, first
       model listed wins otherwise. Source is `config-provider` — deliberately
       distinct from `config` so `restrictToPreferredProvider` callers keep
       treating it as an unrequested pick.
@@ -118,12 +120,19 @@ other runtime API.
   - **Anthropic** (`type: api`): `/v1/messages` with `x-api-key`.
   - **Google** (`type: api`): `generateContent` with `x-goog-api-key`; Gemini 3
     uses `thinkingLevel` while older Flash models use `thinkingBudget: 0`.
-  - Everything else: OpenAI-compatible `/chat/completions` against the
+  - Everything else: the wire format comes from the provider's AI-SDK client
+    (`npm`) as declared by the catalog or config. `@ai-sdk/anthropic`
+    providers (e.g. minimax's `/anthropic/v1` endpoint) get the messages
+    wire with `x-api-key`; everything else is OpenAI-compatible
+    `/chat/completions` against the
     provider's base URL, resolved from (1) `provider.<id>.options.baseURL`
     in the OpenCode config, (2) the hardcoded `https://api.openai.com/v1`
      endpoint, or (3) the provider's `api` field from the models.dev catalog.
     Configured API keys honor OpenCode's `{env:NAME}` and `{file:path}`
     substitutions; file contents and resolved credentials remain server-side.
+    A schema request the messages wire answers with prose instead of the
+    forced tool call throws with `status: 422` so callers (the walkthrough)
+    can fall back to asking for JSON in the prompt.
   - `[small-model:diagnostic]` logs record provider/model, input character
     counts, output budget, thinking toggle, HTTP/finish status, and
     content/reasoning lengths without logging prompts, response text, or

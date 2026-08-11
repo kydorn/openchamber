@@ -97,8 +97,30 @@ export const readProviderConfig = (config, providerID) => {
     baseURL: typeof cfg.options?.baseURL === 'string' && cfg.options.baseURL.trim()
       ? cfg.options.baseURL.trim()
       : null,
+    // The AI-SDK client the provider speaks — the wire-format hint (e.g.
+    // "@ai-sdk/anthropic" for Anthropic-compatible endpoints).
+    npm: typeof cfg.npm === 'string' && cfg.npm.trim() ? cfg.npm.trim() : null,
     apiKey,
   };
+};
+
+// Config model records (opencode `provider.<id>.models`) can declare limits
+// for models models.dev does not know — custom OpenAI-compatible endpoints
+// especially. Overlay the config's record over the catalog so budget and
+// capability checks see the same numbers OpenCode itself uses.
+//
+// The merge is per key, never whole-record: config records are often stubs
+// (`{ id: 'model' }` with no limit) written to expose a model in pickers, and
+// those must not erase the catalog's limits for the same model. Config wins
+// on keys it actually declares.
+const mergeModelRecords = (catalogEntry, configEntry) => {
+  if (!catalogEntry || typeof catalogEntry !== 'object') return configEntry;
+  if (!configEntry || typeof configEntry !== 'object') return catalogEntry;
+  const merged = { ...catalogEntry };
+  for (const [key, value] of Object.entries(configEntry)) {
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
 };
 
 export function resolveSmallModel({ auth, catalog, settingsSmallModel, configSmallModel, preferredProviderID, preferredModelID, workingDirectory }) {
@@ -171,7 +193,15 @@ export function resolveSmallModel({ auth, catalog, settingsSmallModel, configSma
     if (!readProviderConfig(config, providerID)?.apiKey
       && !isUsableAuthEntry(getAuthEntryForProvider(auth, providerID))) continue;
     const configModels = cfg.models && typeof cfg.models === 'object' ? cfg.models : {};
-    const models = { ...(catalog?.[providerID]?.models || {}), ...configModels };
+    // Per-key merge: config stubs (`{ id: 'x' }`) must not erase the
+    // catalog's limits for the same model, while declared config values win.
+    const models = {};
+    for (const [modelID, catalogModel] of Object.entries(catalog?.[providerID]?.models || {})) {
+      models[modelID] = catalogModel;
+    }
+    for (const [modelID, configModel] of Object.entries(configModels)) {
+      models[modelID] = mergeModelRecords(models[modelID], configModel);
+    }
     const entries = Object.values(models).filter((model) => model && typeof model === 'object');
     if (entries.length === 0) continue;
     let picked = null;
