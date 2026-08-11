@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, vi } from 'vitest';
 import { resolveSmallModel, parseModelRef, isUsableAuthEntry } from './resolve.js';
+import { readConfig } from '../opencode/shared.js';
+
+vi.mock('../opencode/shared.js', () => ({ readConfig: vi.fn(() => ({})) }));
 
 const catalog = {
   google: {
@@ -193,5 +196,141 @@ describe('resolveSmallModel', () => {
       preferredModelID: 'mistral-large-latest',
     });
     expect(result).toEqual({ providerID: 'mistral', modelID: 'mistral-large-latest', source: 'session-model' });
+  });
+});
+
+describe('resolveSmallModel — config-defined providers', () => {
+  const customProvider = (overrides = {}) => ({
+    provider: {
+      custom: {
+        options: { baseURL: 'http://localhost:11434/v1', apiKey: 'ollama-key', ...(overrides.options || {}) },
+        models: {
+          'llama3.1': { id: 'llama3.1', limit: { context: 128_000 } },
+        },
+      },
+      ...(overrides.provider || {}),
+    },
+  });
+
+  it('picks a config-defined provider as a last resort when its key is in config', () => {
+    readConfig.mockReturnValue(customProvider());
+    const result = resolveSmallModel({
+      auth: {},
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'custom', modelID: 'llama3.1', source: 'config-provider' });
+  });
+
+  it('picks a config-defined provider when its key is only in auth.json', () => {
+    readConfig.mockReturnValue(customProvider({ options: { apiKey: undefined } }));
+    const result = resolveSmallModel({
+      auth: { custom: { type: 'api', key: 'auth-key' } },
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'custom', modelID: 'llama3.1', source: 'config-provider' });
+  });
+
+  it('skips a config provider without a baseURL or without models', () => {
+    readConfig.mockReturnValue({
+      provider: {
+        noUrl: { options: { apiKey: 'k' }, models: { m: { id: 'm' } } },
+        noModels: { options: { baseURL: 'http://x/v1', apiKey: 'k' } },
+      },
+    });
+    expect(resolveSmallModel({ auth: {}, catalog, configSmallModel: null, workingDirectory: '/proj' })).toBeNull();
+  });
+
+  it('skips a config provider with no credential anywhere', () => {
+    readConfig.mockReturnValue(customProvider({ options: { apiKey: undefined } }));
+    expect(resolveSmallModel({ auth: {}, catalog, configSmallModel: null, workingDirectory: '/proj' })).toBeNull();
+  });
+
+  it('keeps authenticated providers ahead of config-defined ones', () => {
+    readConfig.mockReturnValue(customProvider());
+    const result = resolveSmallModel({
+      auth: { google: { type: 'api', key: 'g-key' } },
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'google', modelID: 'gemini-2.5-flash', source: 'family-scan' });
+  });
+
+  it('uses the session provider itself when its key lives in config', () => {
+    readConfig.mockReturnValue(customProvider());
+    const result = resolveSmallModel({
+      auth: {},
+      catalog,
+      configSmallModel: null,
+      preferredProviderID: 'custom',
+      preferredModelID: 'llama3.1',
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'custom', modelID: 'llama3.1', source: 'session-model' });
+  });
+
+  it('honors family priority inside config models', () => {
+    readConfig.mockReturnValue({
+      provider: {
+        custom: {
+          options: { baseURL: 'http://localhost:11434/v1', apiKey: 'k' },
+          models: {
+            'tiny-model': { id: 'tiny-model' },
+            'flash-model': { id: 'flash-model', family: 'gemini-flash' },
+          },
+        },
+      },
+    });
+    const result = resolveSmallModel({
+      auth: {},
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'custom', modelID: 'flash-model', source: 'config-provider' });
+  });
+
+  it('lets config models override catalog models of the same id', () => {
+    readConfig.mockReturnValue({
+      provider: {
+        google: {
+          options: { baseURL: 'https://proxy.example.test/v1', apiKey: 'k' },
+          models: {
+            'gemini-2.5-flash': { id: 'gemini-2.5-flash', family: 'gemini-flash', release_date: '2099-01-01' },
+          },
+        },
+      },
+    });
+    const result = resolveSmallModel({
+      auth: {},
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'google', modelID: 'gemini-2.5-flash', source: 'config-provider' });
+  });
+
+  it('prefers a config-defined provider over the legacy Copilot alias fallback', () => {
+    readConfig.mockReturnValue(customProvider());
+    const result = resolveSmallModel({
+      auth: { copilot: { type: 'oauth', access: 't', refresh: 't', expires: 0 } },
+      catalog,
+      configSmallModel: null,
+      workingDirectory: '/proj',
+    });
+    expect(result).toEqual({ providerID: 'custom', modelID: 'llama3.1', source: 'config-provider' });
+  });
+
+  it('treats an unset {env:} apiKey reference as absent', () => {
+    readConfig.mockReturnValue(customProvider({ options: { apiKey: '{env:UNSET_VAR_FOR_SMALL_MODEL_TEST}' } }));
+    expect(resolveSmallModel({ auth: {}, catalog, configSmallModel: null, workingDirectory: '/proj' })).toBeNull();
+  });
+
+  it('does not touch the config when no working directory is given', () => {
+    expect(resolveSmallModel({ auth: {}, catalog, configSmallModel: null })).toBeNull();
   });
 });

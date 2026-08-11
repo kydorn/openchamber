@@ -2,9 +2,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { readAuthFile } from '../opencode/auth.js';
-import { readConfigLayers } from '../opencode/shared.js';
+import { readConfig, readConfigLayers } from '../opencode/shared.js';
 import { getModelCatalog } from './catalog.js';
-import { resolveSmallModel, parseModelRef, isUsableAuthEntry, getAuthEntryForProvider } from './resolve.js';
+import { resolveSmallModel, parseModelRef, isUsableAuthEntry, getAuthEntryForProvider, readProviderConfig } from './resolve.js';
 import { callSmallModel, resolveProviderLogin } from './call.js';
 
 const OPENCHAMBER_SETTINGS_FILE = path.join(
@@ -111,6 +111,7 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
       configSmallModel: readConfiguredSmallModel(directory),
       preferredProviderID,
       preferredModelID,
+      workingDirectory: directory,
     });
 
   if (!resolved) {
@@ -176,22 +177,43 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
  * Provider ids with a usable OpenCode login — the set the small model can
  * actually call. Used by the settings override picker to hide providers that
  * would only ever fail (e.g. opencode free models without a token).
+ *
+ * A config-defined provider counts when it has a baseURL and a credential
+ * somewhere (its own apiKey or an auth.json entry under the same provider
+ * name) — the picker must be able to select the same custom endpoints the
+ * regular agent uses.
  */
-export function listAuthenticatedProviders() {
+export function listAuthenticatedProviders({ workingDirectory } = {}) {
+  const ids = new Set();
   try {
     const auth = readAuthFile();
-    const ids = new Set(
-      Object.keys(auth || {}).filter((providerID) => isUsableAuthEntry(auth[providerID])),
-    );
+    for (const providerID of Object.keys(auth || {})) {
+      if (isUsableAuthEntry(auth[providerID])) {
+        ids.add(providerID);
+      }
+    }
     // The catalog id is github-copilot while legacy auth entries may sit
     // under the copilot alias.
     if (isUsableAuthEntry(getAuthEntryForProvider(auth, 'github-copilot'))) {
       ids.add('github-copilot');
     }
-    return Array.from(ids);
   } catch {
-    return [];
+    // Fall through: config providers below may still be listable.
   }
+  try {
+    const config = workingDirectory ? readConfig(workingDirectory) : null;
+    for (const [providerID, cfg] of Object.entries(config?.provider || {})) {
+      if (!cfg || typeof cfg !== 'object') continue;
+      const { baseURL, apiKey } = readProviderConfig(config, providerID);
+      const models = cfg.models && typeof cfg.models === 'object' ? Object.keys(cfg.models) : [];
+      if (!baseURL || models.length === 0) continue;
+      if (!apiKey && !ids.has(providerID)) continue;
+      ids.add(providerID);
+    }
+  } catch {
+    // Unreadable config: report what auth.json already gave us.
+  }
+  return Array.from(ids);
 }
 
 /**
@@ -232,6 +254,7 @@ export async function describeSmallModel({ directory, preferredProviderID, prefe
       configSmallModel: readConfiguredSmallModel(directory),
       preferredProviderID,
       preferredModelID,
+      workingDirectory: directory,
     });
   if (!resolved) return resolved;
 

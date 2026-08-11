@@ -25,11 +25,28 @@ other runtime API.
   2. Family-priority scan (`gemini-flash` → `gpt-nano` → `claude-haiku`)
      **within the session's provider first** (`preferredProviderID`, like
      OpenCode resolves within the current provider), then over the other
-     providers with a usable auth entry, newest `release_date` first.
-  3. GitHub Copilot hidden utility models (`gpt-*-nano/mini`) — these never
+     providers with a usable auth entry, newest `release_date` first. A
+     config-supplied `provider.<id>.options.apiKey` counts as a usable login
+     (the call path uses the same precedence: config key wins, auth.json
+     next), so a session running on a custom provider can fall back to its
+     own model.
+   3. Config-defined providers (`provider.<id>` in the merged config) with a
+      `baseURL`, at least one model, and a credential somewhere — their own
+      `apiKey` or an auth.json entry under the same provider name. This is the
+      tier that makes custom OpenAI-compatible endpoints (Ollama, LM Studio,
+      proxies) work by default; the call path already resolves their URL and
+      credentials, selection was the only missing piece. An `{env:NAME}`
+      apiKey counts only when the variable is set, so a dangling reference
+      falls through instead of shadowing a working fallback with a
+      call-time error. Config models
+      override catalog models of the same id; family priority applies, first
+      model listed wins otherwise. Source is `config-provider` — deliberately
+      distinct from `config` so `restrictToPreferredProvider` callers keep
+      treating it as an unrequested pick.
+  4. GitHub Copilot hidden utility models (`gpt-*-nano/mini`) — these never
      appear in the catalog, so they participate as the `gpt-nano` family entry
      and as a final utility fallback.
-  4. Last resort: the session's own model (`preferredModelID`) when no small
+  5. Last resort: the session's own model (`preferredModelID`) when no small
      model resolves anywhere — costlier, but always valid.
 - Input clamp: the prompt is measured against the resolved model's catalog
   `limit.context` (minus an output reserve, ~4 chars/token estimate;
@@ -114,6 +131,8 @@ other runtime API.
 - `routes.js` — `GET /api/small-model` (resolution preview) and
   `POST /api/small-model/generate` (`{ prompt, system?, maxOutputTokens?,
   model?, directory? }` → `{ text, providerID, modelID, source }`).
+  `GET` accepts `?directory=` so the picker list includes config-defined
+  providers from that directory's config layers.
 
 ## Registration
 
@@ -125,9 +144,10 @@ module is imported on first request, not at server startup.
 - OpenCode's free models (`opencode/big-pickle`, `*-free`) work without a
   token only through OpenCode's own server — direct calls are rejected, and
   piggybacking on their subsidized infra is out of bounds by design. Every
-  resolution step therefore requires a usable auth entry for the provider:
-  a session on an unauthenticated `opencode` provider falls through to the
-  global scan (or a clean 404 on a vanilla setup with no logins).
+  resolution step therefore requires a usable credential for the provider
+  (an auth.json entry or a config `apiKey`): a session on an
+  unauthenticated `opencode` provider falls through to the global scan (or
+  a clean 404 on a vanilla setup with no logins).
 
 - Anthropic OAuth (Claude Pro/Max) entries are not supported — OpenCode itself
   keeps those outside `auth.json` in this generation; only `type: api` keys

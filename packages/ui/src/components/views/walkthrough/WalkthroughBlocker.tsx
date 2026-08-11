@@ -9,6 +9,7 @@ import { updateDesktopSettings } from '@/lib/persistence';
 import type { WalkthroughBlockedState, WalkthroughModel } from '@/lib/walkthrough/types';
 
 interface WalkthroughBlockerProps {
+  directory?: string;
   reason: WalkthroughBlockedState;
   model?: WalkthroughModel;
   requiredChars?: number;
@@ -25,6 +26,7 @@ const modelLabel = (model?: WalkthroughModel) =>
  * in place rather than sending the user to Settings to guess.
  */
 export const WalkthroughBlocker = ({
+  directory,
   reason,
   model,
   requiredChars,
@@ -48,7 +50,7 @@ export const WalkthroughBlocker = ({
     let cancelled = false;
     (async () => {
       try {
-        const response = await runtimeFetch('/api/small-model', {
+        const response = await runtimeFetch(`/api/small-model${directory ? `?directory=${encodeURIComponent(directory)}` : ''}`, {
           method: 'GET',
           headers: { Accept: 'application/json' },
         });

@@ -383,7 +383,7 @@ export const WalkthroughView = ({ directory }: WalkthroughViewProps) => {
     let cancelled = false;
     (async () => {
       try {
-        const response = await runtimeFetch('/api/small-model', {
+        const response = await runtimeFetch(`/api/small-model${directory ? `?directory=${encodeURIComponent(directory)}` : ''}`, {
           method: 'GET',
           headers: { Accept: 'application/json' },
         });
@@ -772,6 +772,7 @@ export const WalkthroughView = ({ directory }: WalkthroughViewProps) => {
       <div className={cn('flex min-h-0 flex-1', showToc ? 'flex-row' : 'flex-col')}>
         {blockedReason ? (
           <WalkthroughBlocker
+            directory={directory}
             reason={blockedReason}
             model={blockedModel}
             requiredChars={blockedRequiredChars}

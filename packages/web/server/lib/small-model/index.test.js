@@ -26,9 +26,9 @@ vi.mock('./call.js', () => ({
   }),
 }));
 
-const { generateSmallModelText, describeSmallModel } = await import('./index.js');
+const { generateSmallModelText, describeSmallModel, listAuthenticatedProviders } = await import('./index.js');
 const { readAuthFile } = await import('../opencode/auth.js');
-const { readConfigLayers } = await import('../opencode/shared.js');
+const { readConfig, readConfigLayers } = await import('../opencode/shared.js');
 const { getModelCatalog } = await import('./catalog.js');
 const { callSmallModel } = await import('./call.js');
 
@@ -255,6 +255,52 @@ describe('output budget and input reserve', () => {
     const described = await describeSmallModel({ directory: '/proj', outputReserveTokens: 24_000 });
 
     expect(described.outputTokens).toBe(24_000);
+  });
+});
+
+describe('listAuthenticatedProviders', () => {
+  beforeEach(() => {
+    readAuthFile.mockReturnValue({ anthropic: { type: 'api', key: 'sk-ant' } });
+    readConfig.mockReturnValue({});
+  });
+
+  it('lists auth.json providers', () => {
+    expect(listAuthenticatedProviders()).toContain('anthropic');
+  });
+
+  it('adds config-defined providers that have a baseURL, models, and a credential', () => {
+    readConfig.mockReturnValue({
+      provider: {
+        custom: {
+          options: { baseURL: 'http://localhost:11434/v1', apiKey: 'k' },
+          models: { 'llama3.1': { id: 'llama3.1' } },
+        },
+      },
+    });
+    expect(listAuthenticatedProviders({ workingDirectory: '/proj' })).toContain('custom');
+  });
+
+  it('counts an auth.json entry under the same provider name as the credential', () => {
+    readConfig.mockReturnValue({
+      provider: {
+        custom: {
+          options: { baseURL: 'http://localhost:11434/v1' },
+          models: { 'llama3.1': { id: 'llama3.1' } },
+        },
+      },
+    });
+    readAuthFile.mockReturnValue({ custom: { type: 'api', key: 'auth-key' } });
+    expect(listAuthenticatedProviders({ workingDirectory: '/proj' })).toContain('custom');
+  });
+
+  it('skips config providers without a baseURL, models, or credential', () => {
+    readConfig.mockReturnValue({
+      provider: {
+        noUrl: { options: { apiKey: 'k' }, models: { m: { id: 'm' } } },
+        noCred: { options: { baseURL: 'http://x/v1' }, models: { m: { id: 'm' } } },
+      },
+    });
+    expect(listAuthenticatedProviders({ workingDirectory: '/proj' })).toEqual(['anthropic']);
   });
 });
 
