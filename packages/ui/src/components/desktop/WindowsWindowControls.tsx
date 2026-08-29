@@ -142,7 +142,9 @@ export const WindowsWindowControls = React.memo(function WindowsWindowControls({
       <div
         className={cn(
           'app-region-no-drag group/wctl flex h-8 shrink-0 items-center',
-          isLeft ? 'mr-1' : 'ml-1',
+          // macOS-style circles keep an edge inset on the right (the header's
+          // flush pr-0 is a Windows-caption convention, classic style only).
+          isLeft ? 'mr-1' : 'ml-1 mr-3',
         )}
         aria-label={t('header.windowControls.groupAria')}
       >
