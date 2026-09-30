@@ -36,8 +36,13 @@ describe('Ollama Cloud quota provider', () => {
   it('reports an unreadable body as such, not as a missing usage shape', async () => {
     // A body that cannot be read and a body that carries no usage are different
     // failures; merging them would hide a transport problem behind "no data".
-    await expect(fetchOllamaCloudUsage('key', async () => new Response('<html></html>')))
-      .rejects.toThrow(/not valid JSON/);
+    // The parser's wording differs per runner, so the failure is stubbed the
+    // way the sibling suites do it and only the stub's own message is asserted.
+    await expect(fetchOllamaCloudUsage('key', async () => ({
+      status: 200,
+      ok: true,
+      json: async () => { throw new SyntaxError('Unexpected token'); },
+    }))).rejects.toThrow('Unexpected token');
   });
 
   it('maps the current single-bucket shape', () => {
@@ -77,10 +82,13 @@ describe('Ollama Cloud quota provider', () => {
   it('answers no windows when the parsed payload carries no limits', () => {
     expect(toUsageWindows({})).toEqual({});
     expect(toUsageWindows({ limits: {} })).toEqual({});
+    // `asObject` accepts an array, whose keys are indices: without the guard
+    // this renders a window named `0`. The VS Code twin rejects it outright.
+    expect(toUsageWindows({ limits: [{ usage: 0.5 }] })).toEqual({});
   });
 
   it('rejects a body that is not a usage response rather than reading it as no usage', async () => {
-    for (const body of [null, 'nope', { limits: 'nope' }]) {
+    for (const body of [null, 'nope', { limits: 'nope' }, { limits: [{ usage: 0.5 }] }]) {
       await expect(fetchOllamaCloudUsage('key', async () => new Response(JSON.stringify(body))))
         .rejects.toThrow('could not be parsed');
     }

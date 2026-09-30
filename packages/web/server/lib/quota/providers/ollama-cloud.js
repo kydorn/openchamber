@@ -59,7 +59,11 @@ const toUsageFraction = (bucket) => {
 export const toUsageWindows = (payload) => {
   const windows = {};
   const limits = asObject(asObject(payload)?.limits);
-  for (const [name, raw] of Object.entries(limits ?? {})) {
+  // `asObject` accepts an array, whose entries are indices, so an array-shaped
+  // `limits` would render as windows named `0`, `1`, ... The VS Code twin
+  // rejects anything that is not a plain object, and the two must agree.
+  if (!limits || Array.isArray(limits)) return windows;
+  for (const [name, raw] of Object.entries(limits)) {
     const usage = toUsageFraction(raw);
     if (!name || usage === null) continue;
     windows[name] = toUsageWindow({

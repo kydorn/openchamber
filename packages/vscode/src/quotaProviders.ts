@@ -805,9 +805,7 @@ export const listConfiguredQuotaProviders = async () => {
   // Ollama Cloud reads its key from OpenCode's credential store, so it is
   // configured exactly when that integration has a key.
   const ollamaAuth = normalizeAuthEntry(getAuthEntry(auth, ['ollama-cloud', 'ollamacloud']));
-  if (ollamaAuth && (typeof ollamaAuth.key === 'string' || typeof ollamaAuth.token === 'string')) {
-    configured.add('ollama-cloud');
-  }
+  if (asNonEmptyString(ollamaAuth?.key) ?? asNonEmptyString(ollamaAuth?.token)) configured.add('ollama-cloud');
 
   const anthropicAuth = normalizeAuthEntry(getAuthEntry(auth, ['anthropic', 'claude']));
   if (anthropicAuth && ((anthropicAuth as Record<string, unknown>).access || (anthropicAuth as Record<string, unknown>).token)) {
